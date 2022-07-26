@@ -1,26 +1,45 @@
-#include <ntddk.h>
-
 /*
  * ekknod@2021
- * 
- * this method was part of my hobby anti-cheat, and decided to make it public.
- * It should catch all hidden threads, doesn't matter where you unlink it.
  *
+ * these methods were part of my hobby anti-cheat, and decided to make it public.
+ * it's targetted against common kernel drivers.
+ * 
+ * current methods:
+ * - hidden threads
+ * - virtual memory access
+ * - physical memory access
+ * 
  */
+
+#include <intrin.h>
+#include <ntifs.h>
+#include "ia32.h"
+#include "vm.h"
+
+
+#define TARGET_PROCESS "csgo.exe"
+#define TARGET_MODULE L"client.dll"
+#define TARGET_MODULEADDRESS 0x4DDB8FC // dwEntityList
+
 
 typedef struct _KPRCB* PKPRCB;
 
-extern PKPRCB
+__declspec(dllimport) PKPRCB
 KeQueryPrcbAddress(
 	__in ULONG Number
 );
 
+#ifndef CUSTOMTYPES
+#define CUSTOMTYPES
 typedef ULONG_PTR QWORD;
 typedef ULONG DWORD;
 typedef int BOOL;
+#endif
 
 __declspec(dllimport)
 PCSTR PsGetProcessImageFileName(QWORD process);
+
+
 
 PVOID thread_object;
 HANDLE thread_handle;
@@ -88,6 +107,252 @@ void NtSleep(DWORD milliseconds)
 #endif
 }
 
+void ThreadDetection(QWORD target_game)
+{
+	/*
+	 * I'm not focusing to make clean code,
+	 * this is just anti-cheat bench.
+	 * 
+	 * I have written this in just couple minutes,
+	 * that's why it's repeating a lot. who cares :D
+	 * 
+	 * logic is easy to understand at least.
+	 *
+	 */
+
+	QWORD current_thread, next_thread;
+
+	for (int i = 0; i < KeNumberProcessors; i++) {
+		PKPRCB prcb = KeQueryPrcbAddress(i);
+
+
+		if (prcb == 0)
+			continue;
+
+
+		current_thread = *(QWORD*)((QWORD)prcb + 0x8);
+		if (current_thread != 0) {
+
+			if (current_thread == (QWORD)PsGetCurrentThread())
+				goto skip_current;
+
+			if (PsGetThreadExitStatus((PETHREAD)current_thread) != STATUS_PENDING)
+				goto skip_current;
+
+			QWORD cid = (QWORD)PsGetThreadId((PETHREAD)current_thread);
+			QWORD host_process = *(QWORD*)(current_thread + 0x220);
+
+			BOOL hidden = 0;
+
+			if (!IsThreadFoundKTHREAD(host_process, current_thread) || !IsThreadFoundEPROCESS(host_process, current_thread))
+			{
+				hidden = 1;
+
+				DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "Hidden thread found [%s %d], %llx, %d]\n",
+					PsGetProcessImageFileName(host_process),
+
+					PsGetProcessId((PEPROCESS)host_process),
+
+					current_thread,
+					(DWORD)cid
+				);
+			}
+
+
+			// if (thread->ApcState.Process == target_game_process) 
+			if (target_game && target_game != host_process && *(QWORD*)(current_thread + 0x98 + 0x20) == target_game) {
+
+
+				// small filter before proper validating
+				BOOL temporary_whitelist = 0;
+				if (host_process == (QWORD)PsGetCurrentProcess() && !hidden)
+				{
+					temporary_whitelist = 1;
+				}
+
+				char* target_str;
+				if (hidden)
+					target_str = "[%s] Hidden Thread (%llx, %ld) is attached to %s\n";
+				else
+					target_str = "[%s] Thread (%llx, %ld) is attached to %s\n";
+
+
+				if (!temporary_whitelist)
+				DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, target_str,
+					PsGetProcessImageFileName(host_process),
+					current_thread,
+					(DWORD)cid,
+					PsGetProcessImageFileName(*(QWORD*)(current_thread + 0x98 + 0x20))
+				);
+
+			}
+
+			
+
+		}
+	skip_current:
+
+		next_thread = *(QWORD*)((QWORD)prcb + 0x10);
+
+
+		if (next_thread) {
+
+			if (next_thread == (QWORD)PsGetCurrentThread())
+				continue;
+
+			if (PsGetThreadExitStatus((PETHREAD)next_thread) != STATUS_PENDING)
+				continue;
+
+			QWORD cid = (QWORD)PsGetThreadId((PETHREAD)next_thread);
+			QWORD host_process = *(QWORD*)(next_thread + 0x220);
+
+
+			BOOL hidden = 0;
+
+
+			if (!IsThreadFoundKTHREAD(host_process, next_thread) || !IsThreadFoundEPROCESS(host_process, next_thread))
+			{
+				hidden = 1;
+
+				DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "Hidden thread found [%s %d], %llx, %d]\n",
+					PsGetProcessImageFileName(host_process),
+
+					PsGetProcessId((PEPROCESS)host_process),
+
+					next_thread,
+					(DWORD)cid
+				);
+			}
+
+			// if (thread->ApcState.Process == target_game_process) 
+			if (target_game && target_game != host_process && *(QWORD*)(next_thread + 0x98 + 0x20) == target_game) {
+				// small filter before proper validating
+				BOOL temporary_whitelist = 0;
+				if (host_process == (QWORD)PsGetCurrentProcess() && !hidden)
+				{
+					temporary_whitelist = 1;
+				}
+
+
+				char* target_str;
+				if (hidden)
+					target_str = "[%s] Hidden Thread (%llx, %ld) is attached to %s\n";
+				else
+					target_str = "[%s] Thread (%llx, %ld) is attached to %s\n";
+
+
+				if (!temporary_whitelist)
+				DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "[%s] Thread (%llx, %ld) is attached to %s\n",
+					PsGetProcessImageFileName(host_process),
+					next_thread,
+					(DWORD)cid,
+					PsGetProcessImageFileName(*(QWORD*)(next_thread + 0x98 + 0x20))
+				);
+
+			}
+
+		}
+
+
+	}
+}
+
+#define ABS(a)                          \
+  (((a) < 0) ? (-(a)) : (a))
+
+BOOLEAN IsAddressEqual(LONGLONG address0, LONGLONG address2)
+{
+	LONGLONG res = ABS((LONGLONG)(address2 - address0));
+
+	return res <= 0x1000;
+}
+
+// page walking code taken from https://github.com/Deputation/pagewalkr
+void PteDetection(QWORD target_process, QWORD target_physicaladdress)
+{
+
+
+
+
+	CR3 kernel_cr3;
+	kernel_cr3.flags = __readcr3();
+	
+	PHYSICAL_ADDRESS phys_buffer;
+	phys_buffer.QuadPart = kernel_cr3.AddressOfPageDirectory << PAGE_SHIFT;
+
+	PML4E_64* pml4 = (PML4E_64*)(MmGetVirtualForPhysical(phys_buffer));
+
+	if (!MmIsAddressValid(pml4) || !pml4)
+		return;
+
+	
+	for (int pml4_index = 0; pml4_index < 512; pml4_index++) {
+
+		phys_buffer.QuadPart = pml4[pml4_index].PageFrameNumber << PAGE_SHIFT;
+		if (!pml4[pml4_index].Present)
+		{
+			continue;
+		}
+
+
+
+		PDPTE_64* pdpt = (PDPTE_64*)(MmGetVirtualForPhysical(phys_buffer));
+		if (!MmIsAddressValid(pdpt) || !pdpt)
+			continue;
+
+		for (int pdpt_index = 0; pdpt_index < 512; pdpt_index++) {
+
+			phys_buffer.QuadPart = pdpt[pdpt_index].PageFrameNumber << PAGE_SHIFT;
+			if (!pdpt[pdpt_index].Present)
+			{
+				continue;
+			}
+
+			PDE_64* pde = (PDE_64*)(MmGetVirtualForPhysical(phys_buffer));
+			if (!MmIsAddressValid(pde) || !pde)
+				continue;
+
+
+
+			for (int pde_index = 0; pde_index < 512; pde_index++) {
+				phys_buffer.QuadPart = pde[pde_index].PageFrameNumber << PAGE_SHIFT;
+
+				if (!pde[pde_index].Present)
+				{
+					continue;
+				}
+
+				PTE_64* pte = (PTE_64*)(MmGetVirtualForPhysical(phys_buffer));
+				if (!MmIsAddressValid(pte) || !pte)
+					continue;
+
+				for (int pte_index = 0; pte_index < 512; pte_index++) {
+					phys_buffer.QuadPart = pte[pte_index].PageFrameNumber << PAGE_SHIFT;
+					if (!pte[pte_index].Present) {
+						continue;
+					}
+
+
+
+
+
+					if (IsAddressEqual(phys_buffer.QuadPart, (LONGLONG)target_physicaladdress))
+					{
+						DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "Physical Memory PTE pointing to %s(%llx, %llx)\n",
+							PsGetProcessImageFileName(target_process),
+							pml4[pml4_index].PageFrameNumber << PAGE_SHIFT,
+							phys_buffer.QuadPart
+						);
+					}
+
+					
+				}
+
+			}
+		}
+	}
+}
+
 VOID
 DriverUnload(
 	_In_ struct _DRIVER_OBJECT* DriverObject
@@ -112,82 +377,94 @@ DriverUnload(
 	}
 }
 
+__declspec(dllimport)
+BOOLEAN PsGetProcessExitProcessCalled(PEPROCESS process);
+
 NTSTATUS system_thread(void)
 {
-	DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "[+] Anti-Cheat.sys -> catch hidden threads\n");
+	DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "[+] Anti-Cheat.sys is launched\n");
 
 
-
+	QWORD target_game = 0;
+	QWORD target_physicaladdress = 0;
 
 	while (gExitCalled == 0) {
 		NtSleep(1);
 
+		
 
-		for (int i = 0; i < KeNumberProcessors; i++) {
-			PKPRCB prcb = KeQueryPrcbAddress(i);
+		if (target_game == 0 || PsGetProcessExitProcessCalled((PEPROCESS)target_game)) {
+			target_physicaladdress = 0;
+			target_game    = GetProcessByName(TARGET_PROCESS);
 
-
-			if (prcb == 0)
-				continue;
-
-
-			QWORD current_thread = *(QWORD*)((QWORD)prcb + 0x8);
-			if (current_thread == 0)
-				continue;
-
-			// ohhohhoho, don't go manipulate ETHREAD ExitStatus, it can be anyway verified.
-			if (PsGetThreadExitStatus((PETHREAD)current_thread) != STATUS_PENDING)
-				continue;
-
-			QWORD cid = (QWORD)PsGetThreadId((PETHREAD)current_thread);
-			QWORD host_process = *(QWORD*)(current_thread + 0x220);
+			if (target_game == 0)
+				goto skip_address;
+		}
 
 
+		if (target_physicaladdress == 0) {
+			KAPC_STATE state;
+			BOOL was_attached = 0;
 
-			if (!IsThreadFoundKTHREAD(host_process, current_thread) || !IsThreadFoundEPROCESS(host_process, current_thread))
-			{
-				DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "Hidden thread found [%s %d], %llx, %d]\n",
-					PsGetProcessImageFileName(host_process),
+			__try {
+			
+				KeStackAttachProcess((PRKPROCESS)target_game, &state);
 
-					PsGetProcessId((PEPROCESS)host_process),
+				was_attached = 1;
 
-					current_thread,
-					(DWORD)cid
-				);
-			}
+				QWORD client_dll = GetModuleByName(target_game, TARGET_MODULE);
 
-			QWORD next_thread = *(QWORD*)((QWORD)prcb + 0x10);
-
-
-			if (next_thread) {
-
-				// ohhohhoho, don't go manipulate ETHREAD ExitStatus, it can be anyway verified.
-				if (PsGetThreadExitStatus((PETHREAD)next_thread) != STATUS_PENDING)
-					continue;
-
-				cid = (QWORD)PsGetThreadId((PETHREAD)next_thread);
-				host_process = *(QWORD*)(next_thread + 0x220);
+				if (client_dll == 0)
+					goto E0;
 
 
-				if (!IsThreadFoundKTHREAD(host_process, next_thread) || !IsThreadFoundEPROCESS(host_process, next_thread))
+				QWORD temporary_address = client_dll + TARGET_MODULEADDRESS;
+				PHYSICAL_ADDRESS entity_0 = MmGetPhysicalAddress((PVOID)temporary_address);
+				target_physicaladdress = entity_0.QuadPart;
+			E0:
+				KeUnstackDetachProcess(&state);
+
+			
+			} __except (1) {
+
+				if (was_attached)
 				{
-					DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "Hidden thread found [%s %d], %llx, %d]\n",
-						PsGetProcessImageFileName(host_process),
-
-						PsGetProcessId((PEPROCESS)host_process),
-
-						current_thread,
-						(DWORD)cid
-					);
+					KeUnstackDetachProcess(&state);
 				}
 
 			}
 
+			if (target_physicaladdress) {
 
+				DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "[+] Anti-Cheat target physical address: %llx\n",
+					target_physicaladdress
+				);
+
+			}
 		}
+
+
+
+	skip_address:
+
+
+		/*
+		 * Detect system hidden threads
+		 * Detect virtual memory access for our target game
+		 */
+		ThreadDetection(target_game);
+
+		/*
+		 * Detect physical memory access for our target game
+		 */
+		if (target_game && target_physicaladdress)
+			PteDetection(target_game, target_physicaladdress);
+
+
 	}
 	return PsTerminateSystemThread(STATUS_SUCCESS);
 }
+
 
 NTSTATUS DriverEntry(
 	_In_ PDRIVER_OBJECT  DriverObject,
@@ -200,6 +477,10 @@ NTSTATUS DriverEntry(
 
 
 	DriverObject->DriverUnload = DriverUnload;
+
+
+
+
 
 	CLIENT_ID thread_id;
 	PsCreateSystemThread(&thread_handle, STANDARD_RIGHTS_ALL, NULL, NULL, &thread_id, (PKSTART_ROUTINE)system_thread, (PVOID)0);
@@ -214,3 +495,4 @@ NTSTATUS DriverEntry(
 
 	return STATUS_SUCCESS;
 }
+
