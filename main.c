@@ -6,8 +6,8 @@
  * 
  * current methods:
  * - hidden threads
- * - virtual memory access
- * - physical memory access
+ * - virtual memory access (this is just extra to this project and might not work properly)
+ * - physical memory access (this is just extra to this project and might not work properly)
  * 
  */
 
@@ -110,13 +110,16 @@ void NtSleep(DWORD milliseconds)
 void ThreadDetection(QWORD target_game)
 {
 	/*
-	 * I'm not focusing to make clean code,
-	 * this is just anti-cheat bench.
+	 * I'm not focusing to make clean code, this is just anti-cheat test bench.
 	 * 
 	 * I have written this in just couple minutes,
 	 * that's why it's repeating a lot. who cares :D
 	 * 
 	 * logic is easy to understand at least.
+	 * 
+	 * 
+	 * Modern Anti-Cheats what doesn't go through KPRCB properly:
+	 * ESPORTAL/Vanguard/ESEA/EAC(?)/BE(?)
 	 *
 	 */
 
