@@ -19,17 +19,48 @@ typedef ULONG_PTR QWORD;
 typedef ULONG DWORD;
 typedef int BOOL;
 
-extern PCSTR
-PsGetProcessImageFileName(QWORD process);
+__declspec(dllimport)
+PCSTR PsGetProcessImageFileName(QWORD process);
 
 PVOID thread_object;
 HANDLE thread_handle;
 BOOLEAN gExitCalled;
 
-BOOL IsThreadFound(QWORD process, QWORD thread)
+
+
+// EPROCESS
+BOOL IsThreadFoundEPROCESS(QWORD process, QWORD thread)
 {
 	BOOL contains = 0;
 
+	QWORD address = (QWORD)PsGetThreadExitStatus;
+	address += 0xA;
+	DWORD RunDownProtectOffset = *(DWORD*)(address + 3);
+	ULONG ThreadListEntryOffset = RunDownProtectOffset - 0x10;
+
+	PLIST_ENTRY ThreadListEntry = (PLIST_ENTRY)((QWORD)process + *(UINT32*)((char*)PsGetProcessImageFileName + 3) + 0x38);
+	PLIST_ENTRY list = ThreadListEntry;
+
+	while ((list = list->Flink) != ThreadListEntry) {
+
+
+		QWORD ethread_entry = (QWORD)((char*)list - ThreadListEntryOffset);
+		if (ethread_entry == thread) {
+			contains = 1;
+			break;
+		}
+	}
+
+	return contains;
+}
+
+// KTHREAD
+BOOL IsThreadFoundKTHREAD(QWORD process, QWORD thread)
+{
+	BOOL contains = 0;
+
+
+	// KTHREAD list
 	PLIST_ENTRY list_head = (PLIST_ENTRY)((QWORD)process + 0x30);
 	PLIST_ENTRY list_entry = list_head;
 
@@ -43,6 +74,7 @@ BOOL IsThreadFound(QWORD process, QWORD thread)
 
 	return contains;
 }
+
 
 void NtSleep(DWORD milliseconds)
 {
@@ -112,7 +144,7 @@ NTSTATUS system_thread(void)
 
 
 
-			if (!IsThreadFound(host_process, current_thread))
+			if (!IsThreadFoundKTHREAD(host_process, current_thread) || !IsThreadFoundEPROCESS(host_process, current_thread))
 			{
 				DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "Hidden thread found [%s %d], %llx, %d]\n",
 					PsGetProcessImageFileName(host_process),
@@ -136,7 +168,8 @@ NTSTATUS system_thread(void)
 				cid = (QWORD)PsGetThreadId((PETHREAD)next_thread);
 				host_process = *(QWORD*)(next_thread + 0x220);
 
-				if (!IsThreadFound(host_process, next_thread))
+
+				if (!IsThreadFoundKTHREAD(host_process, next_thread) || !IsThreadFoundEPROCESS(host_process, next_thread))
 				{
 					DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "Hidden thread found [%s %d], %llx, %d]\n",
 						PsGetProcessImageFileName(host_process),
