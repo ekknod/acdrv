@@ -5,10 +5,10 @@
  * it's targetted against common kernel drivers.
  * 
  * current methods:
- * - hidden threads
- * - virtual memory access (this is just extra to this project and might not work properly)
- * - physical memory access (this is just extra to this project and might not work properly)
- * 
+ * - Catch hidden / Unlinked system threads
+ * - Catch execution outside of valid module range
+ * - Catch KeStackAttachMemory/MmCopyVirtualMemory/ReadProcessMemory
+ * - Catch Physical memory reading through PTE (Experimental honey pot)
  */
 
 #include <intrin.h>
