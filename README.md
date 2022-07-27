@@ -1,2 +1,2 @@
-# DetectHiddenThreads
-Proper way to catch hidden threads
+# Anti-Cheat-TestBench
+Couple methods against kernel drivers 
