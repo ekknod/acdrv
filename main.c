@@ -40,7 +40,7 @@ __declspec(dllimport)
 PCSTR PsGetProcessImageFileName(QWORD process);
 
 
-
+PDRIVER_OBJECT gDriverObject;
 PVOID thread_object;
 HANDLE thread_handle;
 BOOLEAN gExitCalled;
@@ -194,6 +194,16 @@ void NtSleep(DWORD milliseconds)
 #endif
 }
 
+__declspec(dllimport)
+NTSTATUS
+PsGetContextThread(
+      __in PETHREAD Thread,
+      __inout PCONTEXT ThreadContext,
+      __in KPROCESSOR_MODE Mode
+  );
+
+BOOL IsInValidRange(QWORD address);
+
 void ThreadDetection(QWORD target_game)
 {
 	/*
@@ -229,8 +239,29 @@ void ThreadDetection(QWORD target_game)
 			if (PsGetThreadExitStatus((PETHREAD)current_thread) != STATUS_PENDING)
 				goto skip_current;
 
+
+			CONTEXT ctx = { 0 };
+			ctx.ContextFlags = CONTEXT_ALL;
+
+
+			// 0x100 + 0x10
+			
+
+			
+
 			QWORD cid = (QWORD)PsGetThreadId((PETHREAD)current_thread);
 			QWORD host_process = *(QWORD*)(current_thread + 0x220);
+
+			if (host_process == (QWORD)PsGetCurrentProcess() && NT_SUCCESS(PsGetContextThread((PETHREAD)current_thread, &ctx, KernelMode)))
+			{
+				if (!IsInValidRange(ctx.Rip))
+					DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "[%s] Thread is outside of valid module [%ld, %llx] RIP[%llx]\n",
+						PsGetProcessImageFileName(host_process),
+						cid,
+						current_thread,
+						ctx.Rip
+					);
+			}
 
 			BOOL hidden = 0;
 
@@ -293,11 +324,26 @@ void ThreadDetection(QWORD target_game)
 			if (PsGetThreadExitStatus((PETHREAD)next_thread) != STATUS_PENDING)
 				continue;
 
+
+
 			QWORD cid = (QWORD)PsGetThreadId((PETHREAD)next_thread);
 			QWORD host_process = *(QWORD*)(next_thread + 0x220);
 
 
 			BOOL hidden = 0;
+
+			CONTEXT ctx = { 0 };
+			ctx.ContextFlags = CONTEXT_ALL;
+			if (host_process == (QWORD)PsGetCurrentProcess() && NT_SUCCESS(PsGetContextThread((PETHREAD)next_thread, &ctx, KernelMode)))
+			{
+				if (!IsInValidRange(ctx.Rip))
+					DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "[%s] Thread is outside of valid module [%ld, %llx] RIP[%llx]\n",
+						PsGetProcessImageFileName(host_process),
+						cid,
+						next_thread,
+						ctx.Rip
+					);
+			}
 
 
 			if (!IsThreadFoundKTHREAD(host_process, next_thread) || !IsThreadFoundEPROCESS(host_process, next_thread))
@@ -465,7 +511,11 @@ DriverUnload(
 
 		ZwClose(thread_handle);
 	}
+
+	DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "[+] Anti-Cheat.sys is closed\n");
 }
+
+
 
 __declspec(dllimport)
 BOOLEAN PsGetProcessExitProcessCalled(PEPROCESS process);
@@ -565,7 +615,7 @@ NTSTATUS DriverEntry(
 	(DriverObject);
 	(RegistryPath);
 
-
+	gDriverObject = DriverObject;
 	DriverObject->DriverUnload = DriverUnload;
 
 
@@ -586,3 +636,30 @@ NTSTATUS DriverEntry(
 	return STATUS_SUCCESS;
 }
 
+typedef struct _KLDR_DATA_TABLE_ENTRY {
+        LIST_ENTRY InLoadOrderLinks;
+        VOID* ExceptionTable;
+        UINT32 ExceptionTableSize;
+        VOID* GpValue;
+        VOID* NonPagedDebugInfo;
+        VOID* ImageBase;
+        VOID* EntryPoint;
+        UINT32 SizeOfImage;
+        UNICODE_STRING FullImageName;
+        UNICODE_STRING BaseImageName;
+} LDR_DATA_TABLE_ENTRY, *PLDR_DATA_TABLE_ENTRY;
+
+BOOL IsInValidRange(QWORD address)
+{
+	PLDR_DATA_TABLE_ENTRY ldr = (PLDR_DATA_TABLE_ENTRY)gDriverObject->DriverSection;
+	for (PLIST_ENTRY pListEntry = ldr->InLoadOrderLinks.Flink; pListEntry != &ldr->InLoadOrderLinks; pListEntry = pListEntry->Flink)
+	{
+		
+		PLDR_DATA_TABLE_ENTRY pEntry = CONTAINING_RECORD(pListEntry, LDR_DATA_TABLE_ENTRY, InLoadOrderLinks);
+		if (address >= (QWORD)pEntry->ImageBase && address <= (QWORD)((QWORD)pEntry->ImageBase + pEntry->SizeOfImage))
+			return 1;
+		
+	}
+	
+	return 0;
+}
