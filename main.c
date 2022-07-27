@@ -34,7 +34,10 @@ KeQueryPrcbAddress(
 typedef ULONG_PTR QWORD;
 typedef ULONG DWORD;
 typedef int BOOL;
+typedef unsigned char BYTE;
+typedef unsigned short WORD;
 #endif
+
 
 __declspec(dllimport)
 PCSTR PsGetProcessImageFileName(QWORD process);
@@ -160,8 +163,8 @@ BOOL IsThreadFoundEPROCESS(QWORD process, QWORD thread)
 	return contains;
 }
 
-// KTHREAD
-BOOL IsThreadFoundKTHREAD(QWORD process, QWORD thread)
+// KPROCESS
+BOOL IsThreadFoundKPROCESS(QWORD process, QWORD thread)
 {
 	BOOL contains = 0;
 
@@ -204,6 +207,7 @@ PsGetContextThread(
 
 BOOL IsInValidRange(QWORD address);
 
+
 void ThreadDetection(QWORD target_game)
 {
 	/*
@@ -242,30 +246,31 @@ void ThreadDetection(QWORD target_game)
 
 			CONTEXT ctx = { 0 };
 			ctx.ContextFlags = CONTEXT_ALL;
-
-
-			// 0x100 + 0x10
-			
-
 			
 
 			QWORD cid = (QWORD)PsGetThreadId((PETHREAD)current_thread);
 			QWORD host_process = *(QWORD*)(current_thread + 0x220);
 
-			if (host_process == (QWORD)PsGetCurrentProcess() && NT_SUCCESS(PsGetContextThread((PETHREAD)current_thread, &ctx, KernelMode)))
+			BOOL hidden = 0, invalid_range=0;
+
+
+			if (NT_SUCCESS(PsGetContextThread((PETHREAD)current_thread, &ctx, KernelMode)))
 			{
-				if (!IsInValidRange(ctx.Rip))
+				if (!IsInValidRange(ctx.Rip)) {
+
 					DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "[%s] Thread is outside of valid module [%ld, %llx] RIP[%llx]\n",
 						PsGetProcessImageFileName(host_process),
 						cid,
 						current_thread,
 						ctx.Rip
 					);
+					invalid_range = 1;
+				}
 			}
 
-			BOOL hidden = 0;
+		
 
-			if (!IsThreadFoundKTHREAD(host_process, current_thread) || !IsThreadFoundEPROCESS(host_process, current_thread))
+			if (!IsThreadFoundEPROCESS(host_process, current_thread) || !IsThreadFoundKPROCESS(host_process, current_thread))
 			{
 				hidden = 1;
 
@@ -286,7 +291,7 @@ void ThreadDetection(QWORD target_game)
 
 				// small filter before proper validating
 				BOOL temporary_whitelist = 0;
-				if (host_process == (QWORD)PsGetCurrentProcess() && !hidden)
+				if (host_process == (QWORD)PsGetCurrentProcess() && !hidden && !invalid_range)
 				{
 					temporary_whitelist = 1;
 				}
@@ -330,23 +335,26 @@ void ThreadDetection(QWORD target_game)
 			QWORD host_process = *(QWORD*)(next_thread + 0x220);
 
 
-			BOOL hidden = 0;
+			BOOL hidden = 0, invalid_range=0;
 
 			CONTEXT ctx = { 0 };
 			ctx.ContextFlags = CONTEXT_ALL;
-			if (host_process == (QWORD)PsGetCurrentProcess() && NT_SUCCESS(PsGetContextThread((PETHREAD)next_thread, &ctx, KernelMode)))
+			if (NT_SUCCESS(PsGetContextThread((PETHREAD)next_thread, &ctx, KernelMode)))
 			{
-				if (!IsInValidRange(ctx.Rip))
+				if (!IsInValidRange(ctx.Rip)) {
+
 					DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "[%s] Thread is outside of valid module [%ld, %llx] RIP[%llx]\n",
 						PsGetProcessImageFileName(host_process),
 						cid,
 						next_thread,
 						ctx.Rip
 					);
+					invalid_range=1;
+				}
 			}
 
 
-			if (!IsThreadFoundKTHREAD(host_process, next_thread) || !IsThreadFoundEPROCESS(host_process, next_thread))
+			if (!IsThreadFoundEPROCESS(host_process, next_thread) || !IsThreadFoundKPROCESS(host_process, next_thread))
 			{
 				hidden = 1;
 
@@ -364,7 +372,7 @@ void ThreadDetection(QWORD target_game)
 			if (target_game && target_game != host_process && *(QWORD*)(next_thread + 0x98 + 0x20) == target_game) {
 				// small filter before proper validating
 				BOOL temporary_whitelist = 0;
-				if (host_process == (QWORD)PsGetCurrentProcess() && !hidden)
+				if (host_process == (QWORD)PsGetCurrentProcess() && !hidden && !invalid_range)
 				{
 					temporary_whitelist = 1;
 				}
@@ -378,12 +386,12 @@ void ThreadDetection(QWORD target_game)
 
 
 				if (!temporary_whitelist)
-				DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "[%s] Thread (%llx, %ld) is attached to %s\n",
-					PsGetProcessImageFileName(host_process),
-					next_thread,
-					(DWORD)cid,
-					PsGetProcessImageFileName(*(QWORD*)(next_thread + 0x98 + 0x20))
-				);
+					DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "[%s] Thread (%llx, %ld) is attached to %s\n",
+						PsGetProcessImageFileName(host_process),
+						next_thread,
+						(DWORD)cid,
+						PsGetProcessImageFileName(*(QWORD*)(next_thread + 0x98 + 0x20))
+					);
 
 			}
 
@@ -605,7 +613,6 @@ NTSTATUS system_thread(void)
 	return PsTerminateSystemThread(STATUS_SUCCESS);
 }
 
-
 NTSTATUS DriverEntry(
 	_In_ PDRIVER_OBJECT  DriverObject,
 	_In_ PUNICODE_STRING RegistryPath
@@ -617,9 +624,6 @@ NTSTATUS DriverEntry(
 
 	gDriverObject = DriverObject;
 	DriverObject->DriverUnload = DriverUnload;
-
-
-
 
 
 	CLIENT_ID thread_id;
@@ -656,7 +660,8 @@ BOOL IsInValidRange(QWORD address)
 	{
 		
 		PLDR_DATA_TABLE_ENTRY pEntry = CONTAINING_RECORD(pListEntry, LDR_DATA_TABLE_ENTRY, InLoadOrderLinks);
-		if (address >= (QWORD)pEntry->ImageBase && address <= (QWORD)((QWORD)pEntry->ImageBase + pEntry->SizeOfImage))
+		if (address >= (QWORD)pEntry->ImageBase && address <= (QWORD)((QWORD)pEntry->ImageBase + pEntry->SizeOfImage + 0x1000
+			/* (0x1000) discardable INIT page (win32k), this could be also verified through IMAGE_NT_HEADERS SizeOfImage*/ ))
 			return 1;
 		
 	}
