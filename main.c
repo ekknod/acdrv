@@ -68,6 +68,8 @@ QWORD PsGetProcessWow64Process(PEPROCESS process);
 __declspec(dllimport)
 QWORD PsGetProcessPeb(PEPROCESS process);
 
+QWORD GetModuleHandle(PWCH module_name, QWORD *SizeOfImage);
+
 
 QWORD GetProcessByName(const char* process_name)
 {
@@ -627,6 +629,12 @@ NTSTATUS system_thread(void)
 	return PsTerminateSystemThread(STATUS_SUCCESS);
 }
 
+typedef struct {
+	QWORD base,size;
+} IMAGE_INFO_TABLE ;
+
+IMAGE_INFO_TABLE win32k[3];
+
 NTSTATUS DriverEntry(
 	_In_ PDRIVER_OBJECT  DriverObject,
 	_In_ PUNICODE_STRING RegistryPath
@@ -638,6 +646,10 @@ NTSTATUS DriverEntry(
 
 	gDriverObject = DriverObject;
 	DriverObject->DriverUnload = DriverUnload;
+
+	win32k[0].base = GetModuleHandle(L"win32kbase.sys",&win32k[0].size);
+	win32k[1].base = GetModuleHandle(L"win32kfull.sys", &win32k[1].size);
+	win32k[2].base = GetModuleHandle(L"win32k.sys", &win32k[2].size);
 
 
 	mouse_hook();
@@ -670,6 +682,7 @@ typedef struct _KLDR_DATA_TABLE_ENTRY {
         UNICODE_STRING BaseImageName;
 } LDR_DATA_TABLE_ENTRY, *PLDR_DATA_TABLE_ENTRY;
 
+
 BOOL IsInValidRange(QWORD address)
 {
 	PLDR_DATA_TABLE_ENTRY ldr = (PLDR_DATA_TABLE_ENTRY)gDriverObject->DriverSection;
@@ -677,15 +690,51 @@ BOOL IsInValidRange(QWORD address)
 	{
 		
 		PLDR_DATA_TABLE_ENTRY pEntry = CONTAINING_RECORD(pListEntry, LDR_DATA_TABLE_ENTRY, InLoadOrderLinks);
-		if (address >= (QWORD)pEntry->ImageBase && address <= (QWORD)((QWORD)pEntry->ImageBase + pEntry->SizeOfImage + 0x1000
-			/* (0x1000) discardable INIT page (win32k), this could be also verified through IMAGE_NT_HEADERS SizeOfImage*/ ))
+		if (address >= (QWORD)pEntry->ImageBase && address <= (QWORD)((QWORD)pEntry->ImageBase + pEntry->SizeOfImage ))
 			return 1;
 		
+	}
+
+	// win32k some context are running at discardable memory, this validation could be done also by checking every module from image headers
+	if (win32k[0].base != 0) {
+		if (address >= (QWORD)win32k[0].base && address <= (QWORD)((QWORD)win32k[0].base + win32k[0].size + 0x1000)) {
+			return 1;
+		}
+	}
+
+	if (win32k[1].base != 0) {
+		if (address >= (QWORD)win32k[1].base && address <= (QWORD)((QWORD)win32k[1].base + win32k[1].size + 0x1000)) {
+			return 1;
+		}
+	}
+
+	if (win32k[2].base != 0) {
+		if (address >= (QWORD)win32k[2].base && address <= (QWORD)((QWORD)win32k[2].base + win32k[2].size + 0x1000)) {
+			return 1;
+		}
 	}
 	
 	return 0;
 }
 
+QWORD GetModuleHandle(PWCH module_name, QWORD *SizeOfImage)
+{
+	PLDR_DATA_TABLE_ENTRY ldr = (PLDR_DATA_TABLE_ENTRY)gDriverObject->DriverSection;
+	for (PLIST_ENTRY pListEntry = ldr->InLoadOrderLinks.Flink; pListEntry != &ldr->InLoadOrderLinks; pListEntry = pListEntry->Flink)
+	{
+		
+		PLDR_DATA_TABLE_ENTRY pEntry = CONTAINING_RECORD(pListEntry, LDR_DATA_TABLE_ENTRY, InLoadOrderLinks);
+
+		if (pEntry->BaseImageName.Buffer && wcscmp(pEntry->BaseImageName.Buffer, module_name) == 0) {
+			*SizeOfImage = 0;
+			*SizeOfImage = pEntry->SizeOfImage;
+			return (QWORD)pEntry->ImageBase;
+		}
+		
+	}
+	
+	return 0;
+}
 
 #pragma warning(disable : 4201)
 typedef struct _MOUSE_INPUT_DATA {
@@ -777,6 +826,7 @@ QWORD MouseClassServiceCallback(
 	PULONG InputDataConsumed
 );
 
+
 QWORD MouseClassServiceCallbackHook(
 	PDEVICE_OBJECT DeviceObject,
 	PMOUSE_INPUT_DATA InputDataStart,
@@ -791,7 +841,7 @@ QWORD MouseClassServiceCallbackHook(
 
 	QWORD address = (QWORD)_ReturnAddress();
 	if (address < (QWORD)gMouseObject.hid && address > (QWORD)((QWORD)gMouseObject.hid + gMouseObject.hid_length))
-	{
+	{	
 		DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "Mouse manipulation was detected (%llx)\n", _ReturnAddress());
 	}
 
