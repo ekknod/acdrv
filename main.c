@@ -641,7 +641,7 @@ NTSTATUS system_thread(void)
 
 
 	}
-	return PsTerminateSystemThread(STATUS_SUCCESS);
+	return 0l;
 }
 
 typedef struct {
