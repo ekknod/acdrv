@@ -102,13 +102,21 @@ BOOL vm_is_wow64(QWORD target_process)
 
 static void vm_read(QWORD address, PVOID buffer, QWORD length)
 {
-	memcpy(buffer, (const void*)address, length);
+	// We don't need performance here, lets use more safe approach
+	MM_COPY_ADDRESS temp_address;
+	temp_address.VirtualAddress = (PVOID)address;
+	SIZE_T t;
+	MmCopyMemory( buffer, temp_address, length, MM_COPY_MEMORY_VIRTUAL, &t );
 }
 
 static QWORD vm_read_i64(QWORD address, QWORD length)
 {
+	// We don't need performance here, lets use more safe approach
 	QWORD ret = 0;
-	memcpy(&ret, (const void*)address, length);
+	MM_COPY_ADDRESS temp_address;
+	temp_address.VirtualAddress = (PVOID)address;
+	SIZE_T t;
+	MmCopyMemory( &ret, temp_address, length, MM_COPY_MEMORY_VIRTUAL, &t );
 	return ret;
 }
 
@@ -132,6 +140,10 @@ QWORD GetModuleByName(QWORD target_process, const wchar_t* module_name)
 		return 0;
 
 	a1 = vm_read_i64(vm_read_i64(peb + a0[1], a0[0]) + a0[2], a0[0]);
+
+	if (a1 == 0)
+		return 0;
+
 	a2 = a2 = vm_read_i64(a1 + a0[0], a0[0]);
 	while (a1 != a2) {
 
@@ -142,6 +154,9 @@ QWORD GetModuleByName(QWORD target_process, const wchar_t* module_name)
 			return vm_read_i64(a1 + a0[4], a0[0]);
 		}
 		a1 = vm_read_i64(a1, a0[0]);
+
+		if (a1 == 0)
+			return 0;
 	}
 
 	return 0;
@@ -452,7 +467,7 @@ void PteDetection(QWORD target_process, QWORD target_physicaladdress)
 
 
 		PDPTE_64* pdpt = (PDPTE_64*)(MmGetVirtualForPhysical(phys_buffer));
-		if (!MmIsAddressValid(pdpt) || !pdpt)
+		if (!pdpt)
 			continue;
 
 		for (int pdpt_index = 0; pdpt_index < 512; pdpt_index++) {
