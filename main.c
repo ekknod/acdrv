@@ -1,5 +1,5 @@
 /*
- * ekknod@2021
+ * ekknod@2021-2022
  *
  * these methods were part of my hobby anti-cheat, and decided to make it public.
  * it's targetted against common kernel drivers.
@@ -9,6 +9,7 @@
  * - Catch execution outside of valid module range
  * - Catch KeStackAttachMemory/MmCopyVirtualMemory/ReadProcessMemory
  * - Catch Physical memory reading through PTE (Experimental honey pot)
+ * - Catch manual MouseClassServiceCallback call
  */
 
 #include <intrin.h>
@@ -540,7 +541,6 @@ DriverUnload(
 }
 
 
-
 __declspec(dllimport)
 BOOLEAN PsGetProcessExitProcessCalled(PEPROCESS process);
 
@@ -634,6 +634,7 @@ typedef struct {
 } IMAGE_INFO_TABLE ;
 
 IMAGE_INFO_TABLE win32k[3];
+IMAGE_INFO_TABLE vmusbmouse;
 
 NTSTATUS DriverEntry(
 	_In_ PDRIVER_OBJECT  DriverObject,
@@ -650,6 +651,7 @@ NTSTATUS DriverEntry(
 	win32k[0].base = GetModuleHandle(L"win32kbase.sys",&win32k[0].size);
 	win32k[1].base = GetModuleHandle(L"win32kfull.sys", &win32k[1].size);
 	win32k[2].base = GetModuleHandle(L"win32k.sys", &win32k[2].size);
+	vmusbmouse.base = GetModuleHandle(L"vmusbmouse.sys", &vmusbmouse.size);
 
 
 	mouse_hook();
@@ -690,6 +692,10 @@ BOOL IsInValidRange(QWORD address)
 	{
 		
 		PLDR_DATA_TABLE_ENTRY pEntry = CONTAINING_RECORD(pListEntry, LDR_DATA_TABLE_ENTRY, InLoadOrderLinks);
+
+		if (pEntry->ImageBase == 0)
+			continue;
+
 		if (address >= (QWORD)pEntry->ImageBase && address <= (QWORD)((QWORD)pEntry->ImageBase + pEntry->SizeOfImage ))
 			return 1;
 		
@@ -840,9 +846,13 @@ QWORD MouseClassServiceCallbackHook(
 	(InputDataConsumed);
 
 	QWORD address = (QWORD)_ReturnAddress();
-	if (address < (QWORD)gMouseObject.hid && address > (QWORD)((QWORD)gMouseObject.hid + gMouseObject.hid_length))
-	{	
-		DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "Mouse manipulation was detected (%llx)\n", _ReturnAddress());
+
+	
+	if (address < (QWORD)gMouseObject.hid || address > (QWORD)((QWORD)gMouseObject.hid + gMouseObject.hid_length))
+	{
+		// extra check for vmware virtual machine
+		if (address < (QWORD)vmusbmouse.base || address > (QWORD)((QWORD)vmusbmouse.base + vmusbmouse.size))
+			DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "Mouse manipulation was detected (%llx)\n", _ReturnAddress());
 	}
 
 	// C/C++ -> All Options -> Control Overflow Guard : OFF, otherwise compiler will create CALL instruction and it will BSOD.
