@@ -467,7 +467,7 @@ void PteDetection(QWORD target_process, QWORD target_physicaladdress)
 
 
 		PDPTE_64* pdpt = (PDPTE_64*)(MmGetVirtualForPhysical(phys_buffer));
-		if (!pdpt)
+		if (!MmIsAddressValid(pdpt) || !pdpt)
 			continue;
 
 		for (int pdpt_index = 0; pdpt_index < 512; pdpt_index++) {
