@@ -251,6 +251,7 @@ PKPRCB KeGetCurrentPrcb (VOID)
     return (PKPRCB) __readgsqword (FIELD_OFFSET (KPCR, CurrentPrcb));
 }
 
+
 void ThreadDetection(QWORD target_game)
 {
 	/*
@@ -298,18 +299,22 @@ void ThreadDetection(QWORD target_game)
 
 			
 			
-			if (KeGetCurrentPrcb() != prcb && NT_SUCCESS(PsGetContextThread((PETHREAD)current_thread, &ctx, KernelMode)))
+			if (KeGetCurrentPrcb() != prcb)
 			{
-				if (!IsInValidRange(ctx.Rip)) {
+				// SpecialApcDisable 0x1e6
+				if (*(SHORT*)(current_thread + 0x1e6) == 0 && NT_SUCCESS(PsGetContextThread((PETHREAD)current_thread, &ctx, KernelMode))) {
+					if (!IsInValidRange(ctx.Rip)) {
 
-					DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "[%s] Thread is outside of valid module [%ld, %llx] RIP[%llx]\n",
-						PsGetProcessImageFileName(host_process),
-						cid,
-						current_thread,
-						ctx.Rip
-					);
-					invalid_range = 1;
+						DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "[%s] Thread is outside of valid module [%ld, %llx] RIP[%llx]\n",
+							PsGetProcessImageFileName(host_process),
+							cid,
+							current_thread,
+							ctx.Rip
+						);
+						invalid_range = 1;
+					}
 				}
+				
 			}
 			
 
@@ -382,18 +387,23 @@ void ThreadDetection(QWORD target_game)
 
 			CONTEXT ctx = { 0 };
 			ctx.ContextFlags = CONTEXT_ALL;
-			if (KeGetCurrentPrcb() != prcb && NT_SUCCESS(PsGetContextThread((PETHREAD)next_thread, &ctx, KernelMode)))
+			if (KeGetCurrentPrcb() != prcb)
 			{
-				if (!IsInValidRange(ctx.Rip)) {
+				// SpecialApcDisable 0x1e6
+				if (*(SHORT*)(next_thread + 0x1e6) == 0 && NT_SUCCESS(PsGetContextThread((PETHREAD)next_thread, &ctx, KernelMode))) {
+					
+					if (!IsInValidRange(ctx.Rip)) {
 
-					DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "[%s] Thread is outside of valid module [%ld, %llx] RIP[%llx]\n",
-						PsGetProcessImageFileName(host_process),
-						cid,
-						next_thread,
-						ctx.Rip
-					);
-					invalid_range=1;
+						DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "[%s] Thread is outside of valid module [%ld, %llx] RIP[%llx]\n",
+							PsGetProcessImageFileName(host_process),
+							cid,
+							next_thread,
+							ctx.Rip
+						);
+						invalid_range=1;
+					}
 				}
+				
 			}
 
 
