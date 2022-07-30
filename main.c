@@ -645,9 +645,10 @@ NTSTATUS system_thread(void)
 
 		/*
 		 * Detect physical memory access for our target game
+		 * this is removed temporary, this get stuck often
 		 */
-		if (target_game && target_physicaladdress)
-			PteDetection(target_game, target_physicaladdress);
+		// if (target_game && target_physicaladdress)
+		//	PteDetection(target_game, target_physicaladdress);
 
 
 	}
