@@ -116,9 +116,12 @@ static QWORD vm_read_i64(QWORD address, QWORD length)
 	MM_COPY_ADDRESS temp_address;
 	temp_address.VirtualAddress = (PVOID)address;
 	SIZE_T t;
-	MmCopyMemory( &ret, temp_address, length, MM_COPY_MEMORY_VIRTUAL, &t );
-	return ret;
+	if (NT_SUCCESS(MmCopyMemory( &ret, temp_address, length, MM_COPY_MEMORY_VIRTUAL, &t )))
+		return ret;
+	return 0;
 }
+
+
 
 QWORD GetModuleByName(QWORD target_process, const wchar_t* module_name)
 {
@@ -145,7 +148,14 @@ QWORD GetModuleByName(QWORD target_process, const wchar_t* module_name)
 		return 0;
 
 	a2 = a2 = vm_read_i64(a1 + a0[0], a0[0]);
+
+	int max_module_count = 1000;
 	while (a1 != a2) {
+		max_module_count--;
+
+		/* dont get stuck */
+		if (max_module_count == 0)
+			return 0;
 
 		vm_read(vm_read_i64(a1 + a0[3], a0[0]), (char*)a3, (wcslen(module_name) * 2) + 2);
 
