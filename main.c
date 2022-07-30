@@ -299,7 +299,7 @@ void ThreadDetection(QWORD target_game)
 
 			
 			
-			if (KeGetCurrentPrcb() != prcb)
+			// if (KeGetCurrentPrcb() != prcb) ; I don't think this is anymore required after SpecialApcDisable check
 			{
 				// SpecialApcDisable 0x1e6
 				if (*(SHORT*)(current_thread + 0x1e6) == 0 && NT_SUCCESS(PsGetContextThread((PETHREAD)current_thread, &ctx, KernelMode))) {
@@ -387,7 +387,8 @@ void ThreadDetection(QWORD target_game)
 
 			CONTEXT ctx = { 0 };
 			ctx.ContextFlags = CONTEXT_ALL;
-			if (KeGetCurrentPrcb() != prcb)
+
+			// if (KeGetCurrentPrcb() != prcb) ; I don't think this is anymore required after SpecialApcDisable check
 			{
 				// SpecialApcDisable 0x1e6
 				if (*(SHORT*)(next_thread + 0x1e6) == 0 && NT_SUCCESS(PsGetContextThread((PETHREAD)next_thread, &ctx, KernelMode))) {
