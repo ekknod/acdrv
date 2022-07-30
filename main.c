@@ -244,6 +244,13 @@ PsGetContextThread(
 BOOL IsInValidRange(QWORD address);
 
 
+PKPRCB KeGetCurrentPrcb (VOID)
+{
+
+	
+    return (PKPRCB) __readgsqword (FIELD_OFFSET (KPCR, CurrentPrcb));
+}
+
 void ThreadDetection(QWORD target_game)
 {
 	/*
@@ -290,7 +297,8 @@ void ThreadDetection(QWORD target_game)
 			BOOL hidden = 0, invalid_range=0;
 
 			
-			if (NT_SUCCESS(PsGetContextThread((PETHREAD)current_thread, &ctx, KernelMode)))
+			
+			if (KeGetCurrentPrcb() != prcb && NT_SUCCESS(PsGetContextThread((PETHREAD)current_thread, &ctx, KernelMode)))
 			{
 				if (!IsInValidRange(ctx.Rip)) {
 
@@ -374,8 +382,7 @@ void ThreadDetection(QWORD target_game)
 
 			CONTEXT ctx = { 0 };
 			ctx.ContextFlags = CONTEXT_ALL;
-
-			if (NT_SUCCESS(PsGetContextThread((PETHREAD)next_thread, &ctx, KernelMode)))
+			if (KeGetCurrentPrcb() != prcb && NT_SUCCESS(PsGetContextThread((PETHREAD)next_thread, &ctx, KernelMode)))
 			{
 				if (!IsInValidRange(ctx.Rip)) {
 
@@ -579,7 +586,7 @@ NTSTATUS system_thread(void)
 
 	while (gExitCalled == 0) {
 
-		NtSleep(5);
+		NtSleep(1);
 
 		
 
