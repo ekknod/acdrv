@@ -647,8 +647,6 @@ NTSTATUS system_thread(void)
 typedef struct {
 	QWORD base,size;
 } IMAGE_INFO_TABLE ;
-
-IMAGE_INFO_TABLE win32k[3];
 IMAGE_INFO_TABLE vmusbmouse;
 
 NTSTATUS DriverEntry(
@@ -662,12 +660,6 @@ NTSTATUS DriverEntry(
 
 	gDriverObject = DriverObject;
 	DriverObject->DriverUnload = DriverUnload;
-
-	win32k[0].base = GetModuleHandle(L"win32kbase.sys",&win32k[0].size);
-	win32k[1].base = GetModuleHandle(L"win32kfull.sys", &win32k[1].size);
-	win32k[2].base = GetModuleHandle(L"win32k.sys", &win32k[2].size);
-	vmusbmouse.base = GetModuleHandle(L"vmusbmouse.sys", &vmusbmouse.size);
-
 
 	mouse_hook();
 
@@ -711,30 +703,13 @@ BOOL IsInValidRange(QWORD address)
 		if (pEntry->ImageBase == 0)
 			continue;
 
-		if (address >= (QWORD)pEntry->ImageBase && address <= (QWORD)((QWORD)pEntry->ImageBase + pEntry->SizeOfImage ))
+		/* 0x1000 discardable section. this should be manually verified from image nt (0x3C + 0x50) * 
+		but because this is non serious AC we assume all modules has it */
+		if (address >= (QWORD)pEntry->ImageBase && address <= (QWORD)((QWORD)pEntry->ImageBase + pEntry->SizeOfImage + 0x1000 ))
 			return 1;
 		
 	}
 
-	// win32k some context are running at discardable memory, this validation could be done also by checking every module from image headers
-	if (win32k[0].base != 0) {
-		if (address >= (QWORD)win32k[0].base && address <= (QWORD)((QWORD)win32k[0].base + win32k[0].size + 0x1000)) {
-			return 1;
-		}
-	}
-
-	if (win32k[1].base != 0) {
-		if (address >= (QWORD)win32k[1].base && address <= (QWORD)((QWORD)win32k[1].base + win32k[1].size + 0x1000)) {
-			return 1;
-		}
-	}
-
-	if (win32k[2].base != 0) {
-		if (address >= (QWORD)win32k[2].base && address <= (QWORD)((QWORD)win32k[2].base + win32k[2].size + 0x1000)) {
-			return 1;
-		}
-	}
-	
 	return 0;
 }
 
