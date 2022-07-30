@@ -289,7 +289,7 @@ void ThreadDetection(QWORD target_game)
 
 			BOOL hidden = 0, invalid_range=0;
 
-
+			
 			if (NT_SUCCESS(PsGetContextThread((PETHREAD)current_thread, &ctx, KernelMode)))
 			{
 				if (!IsInValidRange(ctx.Rip)) {
@@ -303,8 +303,7 @@ void ThreadDetection(QWORD target_game)
 					invalid_range = 1;
 				}
 			}
-
-		
+			
 
 			if (!IsThreadFoundEPROCESS(host_process, current_thread) || !IsThreadFoundKPROCESS(host_process, current_thread))
 			{
@@ -375,6 +374,7 @@ void ThreadDetection(QWORD target_game)
 
 			CONTEXT ctx = { 0 };
 			ctx.ContextFlags = CONTEXT_ALL;
+
 			if (NT_SUCCESS(PsGetContextThread((PETHREAD)next_thread, &ctx, KernelMode)))
 			{
 				if (!IsInValidRange(ctx.Rip)) {
@@ -578,7 +578,8 @@ NTSTATUS system_thread(void)
 	QWORD target_physicaladdress = 0;
 
 	while (gExitCalled == 0) {
-		NtSleep(1);
+
+		NtSleep(5);
 
 		
 
@@ -645,13 +646,15 @@ NTSTATUS system_thread(void)
 
 		/*
 		 * Detect physical memory access for our target game
-		 * this is removed temporary, this get stuck often
 		 */
-		// if (target_game && target_physicaladdress)
-		//	PteDetection(target_game, target_physicaladdress);
+		if (target_game && target_physicaladdress)
+			PteDetection(target_game, target_physicaladdress);
 
 
 	}
+
+	DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "[+] Anti-Cheat.sys thread is closed\n");
+
 	return 0l;
 }
 
