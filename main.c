@@ -661,8 +661,9 @@ NTSTATUS DriverEntry(
 	gDriverObject = DriverObject;
 	DriverObject->DriverUnload = DriverUnload;
 
-	mouse_hook();
+	vmusbmouse.base = GetModuleHandle(L"vmusbmouse.sys", &vmusbmouse.size);
 
+	mouse_hook();
 
 	CLIENT_ID thread_id;
 	PsCreateSystemThread(&thread_handle, STANDARD_RIGHTS_ALL, NULL, NULL, &thread_id, (PKSTART_ROUTINE)system_thread, (PVOID)0);
