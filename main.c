@@ -172,8 +172,6 @@ QWORD GetModuleByName(QWORD target_process, const wchar_t* module_name)
 	return 0;
 }
 
-
-// EPROCESS
 BOOL IsThreadFoundEPROCESS(QWORD process, QWORD thread)
 {
 	BOOL contains = 0;
@@ -198,28 +196,6 @@ BOOL IsThreadFoundEPROCESS(QWORD process, QWORD thread)
 
 	return contains;
 }
-
-// KPROCESS
-BOOL IsThreadFoundKPROCESS(QWORD process, QWORD thread)
-{
-	BOOL contains = 0;
-
-
-	// KTHREAD list
-	PLIST_ENTRY list_head = (PLIST_ENTRY)((QWORD)process + 0x30);
-	PLIST_ENTRY list_entry = list_head;
-
-	while ((list_entry = list_entry->Flink) != 0 && list_entry != list_head) {
-		QWORD entry = (QWORD)((char*)list_entry - 0x2f8);
-		if (entry == thread) {
-			contains = 1;
-			break;
-		}
-	}
-
-	return contains;
-}
-
 
 void NtSleep(DWORD milliseconds)
 {
@@ -318,10 +294,9 @@ void ThreadDetection(QWORD target_game)
 			}
 			
 
-			if (!IsThreadFoundEPROCESS(host_process, current_thread) || !IsThreadFoundKPROCESS(host_process, current_thread))
+			if (!IsThreadFoundEPROCESS(host_process, current_thread))
 			{
 				hidden = 1;
-
 				DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "Hidden thread found [%s %d], %llx, %d]\n",
 					PsGetProcessImageFileName(host_process),
 
@@ -408,7 +383,7 @@ void ThreadDetection(QWORD target_game)
 			}
 
 
-			if (!IsThreadFoundEPROCESS(host_process, next_thread) || !IsThreadFoundKPROCESS(host_process, next_thread))
+			if (!IsThreadFoundEPROCESS(host_process, next_thread))
 			{
 				hidden = 1;
 
@@ -493,7 +468,6 @@ void PteDetection(QWORD target_process, QWORD target_physicaladdress)
 		}
 
 
-
 		PDPTE_64* pdpt = (PDPTE_64*)(MmGetVirtualForPhysical(phys_buffer));
 		if (!MmIsAddressValid(pdpt) || !pdpt)
 			continue;
@@ -511,7 +485,6 @@ void PteDetection(QWORD target_process, QWORD target_physicaladdress)
 				continue;
 
 
-
 			for (int pde_index = 0; pde_index < 512; pde_index++) {
 				phys_buffer.QuadPart = pde[pde_index].PageFrameNumber << PAGE_SHIFT;
 
@@ -524,15 +497,14 @@ void PteDetection(QWORD target_process, QWORD target_physicaladdress)
 				if (!MmIsAddressValid(pte) || !pte)
 					continue;
 
+				
 				for (int pte_index = 0; pte_index < 512; pte_index++) {
 					phys_buffer.QuadPart = pte[pte_index].PageFrameNumber << PAGE_SHIFT;
 					if (!pte[pte_index].Present) {
 						continue;
 					}
 
-
-
-
+		
 
 					if (IsAddressEqual(phys_buffer.QuadPart, (LONGLONG)target_physicaladdress))
 					{
@@ -545,6 +517,7 @@ void PteDetection(QWORD target_process, QWORD target_physicaladdress)
 
 					
 				}
+				
 
 			}
 		}
