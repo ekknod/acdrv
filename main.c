@@ -8,7 +8,6 @@
  * - Catch hidden / Unlinked system threads
  * - Catch execution outside of valid module range
  * - Catch KeStackAttachMemory/MmCopyVirtualMemory/ReadProcessMemory
- * - Catch Physical memory reading through PTE (Experimental honey pot)
  * - Catch manual MouseClassServiceCallback call
  */
 
@@ -19,8 +18,6 @@
 
 
 #define TARGET_PROCESS "csgo.exe"
-#define TARGET_MODULE L"client.dll"
-#define TARGET_MODULEADDRESS 0x4DDB8FC // dwEntityList
 
 
 typedef struct _KPRCB* PKPRCB;
@@ -71,7 +68,6 @@ QWORD PsGetProcessPeb(PEPROCESS process);
 
 QWORD GetModuleHandle(PWCH module_name, QWORD *SizeOfImage);
 
-
 QWORD GetProcessByName(const char* process_name)
 {
 	QWORD process;
@@ -91,83 +87,6 @@ QWORD GetProcessByName(const char* process_name)
 	L0:
 		entry = *(QWORD*)(entry + gActiveProcessLink) - gActiveProcessLink;
 	} while (entry != process);
-
-	return 0;
-}
-
-BOOL vm_is_wow64(QWORD target_process)
-{
-	return PsGetProcessWow64Process((PEPROCESS)target_process) != 0;
-}
-
-static void vm_read(QWORD address, PVOID buffer, QWORD length)
-{
-	// We don't need performance here, lets use more safe approach
-	MM_COPY_ADDRESS temp_address;
-	temp_address.VirtualAddress = (PVOID)address;
-	SIZE_T t;
-	MmCopyMemory( buffer, temp_address, length, MM_COPY_MEMORY_VIRTUAL, &t );
-}
-
-static QWORD vm_read_i64(QWORD address, QWORD length)
-{
-	// We don't need performance here, lets use more safe approach
-	QWORD ret = 0;
-	MM_COPY_ADDRESS temp_address;
-	temp_address.VirtualAddress = (PVOID)address;
-	SIZE_T t;
-	if (NT_SUCCESS(MmCopyMemory( &ret, temp_address, length, MM_COPY_MEMORY_VIRTUAL, &t )))
-		return ret;
-	return 0;
-}
-
-
-
-QWORD GetModuleByName(QWORD target_process, const wchar_t* module_name)
-{
-
-	QWORD peb;
-	DWORD a0[5];
-	QWORD a1, a2, a3[32];
-
-	if (vm_is_wow64(target_process)) {
-		peb = (QWORD)PsGetProcessWow64Process((PEPROCESS)target_process);
-		a0[0] = 0x04, a0[1] = 0x0C, a0[2] = 0x14, a0[3] = 0x28, a0[4] = 0x10;
-	}
-	else {
-		peb = (QWORD)PsGetProcessPeb((PEPROCESS)target_process);
-		a0[0] = 0x08, a0[1] = 0x18, a0[2] = 0x20, a0[3] = 0x50, a0[4] = 0x20;
-	}
-
-	if (peb == 0)
-		return 0;
-
-	a1 = vm_read_i64(vm_read_i64(peb + a0[1], a0[0]) + a0[2], a0[0]);
-
-	if (a1 == 0)
-		return 0;
-
-	a2 = a2 = vm_read_i64(a1 + a0[0], a0[0]);
-
-	int max_module_count = 1000;
-	while (a1 != a2) {
-		max_module_count--;
-
-		/* dont get stuck */
-		if (max_module_count == 0)
-			return 0;
-
-		vm_read(vm_read_i64(a1 + a0[3], a0[0]), (char*)a3, (wcslen(module_name) * 2) + 2);
-
-
-		if (wcscmp((const wchar_t*)a3, module_name) == 0) {
-			return vm_read_i64(a1 + a0[4], a0[0]);
-		}
-		a1 = vm_read_i64(a1, a0[0]);
-
-		if (a1 == 0)
-			return 0;
-	}
 
 	return 0;
 }
@@ -226,7 +145,6 @@ PKPRCB KeGetCurrentPrcb (VOID)
 	
     return (PKPRCB) __readgsqword (FIELD_OFFSET (KPCR, CurrentPrcb));
 }
-
 
 void ThreadDetection(QWORD target_game)
 {
@@ -430,100 +348,6 @@ void ThreadDetection(QWORD target_game)
 	}
 }
 
-#define ABS(a)                          \
-  (((a) < 0) ? (-(a)) : (a))
-
-BOOLEAN IsAddressEqual(LONGLONG address0, LONGLONG address2)
-{
-	LONGLONG res = ABS((LONGLONG)(address2 - address0));
-
-	return res <= 0x1000;
-}
-
-// page walking code taken from https://github.com/Deputation/pagewalkr
-void PteDetection(QWORD target_process, QWORD target_physicaladdress)
-{
-
-
-
-
-	CR3 kernel_cr3;
-	kernel_cr3.flags = __readcr3();
-	
-	PHYSICAL_ADDRESS phys_buffer;
-	phys_buffer.QuadPart = kernel_cr3.AddressOfPageDirectory << PAGE_SHIFT;
-
-	PML4E_64* pml4 = (PML4E_64*)(MmGetVirtualForPhysical(phys_buffer));
-
-	if (!MmIsAddressValid(pml4) || !pml4)
-		return;
-
-	
-	for (int pml4_index = 0; pml4_index < 512; pml4_index++) {
-
-		phys_buffer.QuadPart = pml4[pml4_index].PageFrameNumber << PAGE_SHIFT;
-		if (!pml4[pml4_index].Present)
-		{
-			continue;
-		}
-
-
-		PDPTE_64* pdpt = (PDPTE_64*)(MmGetVirtualForPhysical(phys_buffer));
-		if (!MmIsAddressValid(pdpt) || !pdpt)
-			continue;
-
-		for (int pdpt_index = 0; pdpt_index < 512; pdpt_index++) {
-
-			phys_buffer.QuadPart = pdpt[pdpt_index].PageFrameNumber << PAGE_SHIFT;
-			if (!pdpt[pdpt_index].Present)
-			{
-				continue;
-			}
-
-			PDE_64* pde = (PDE_64*)(MmGetVirtualForPhysical(phys_buffer));
-			if (!MmIsAddressValid(pde) || !pde)
-				continue;
-
-
-			for (int pde_index = 0; pde_index < 512; pde_index++) {
-				phys_buffer.QuadPart = pde[pde_index].PageFrameNumber << PAGE_SHIFT;
-
-				if (!pde[pde_index].Present)
-				{
-					continue;
-				}
-
-				PTE_64* pte = (PTE_64*)(MmGetVirtualForPhysical(phys_buffer));
-				if (!MmIsAddressValid(pte) || !pte)
-					continue;
-
-				
-				for (int pte_index = 0; pte_index < 512; pte_index++) {
-					phys_buffer.QuadPart = pte[pte_index].PageFrameNumber << PAGE_SHIFT;
-					if (!pte[pte_index].Present) {
-						continue;
-					}
-
-		
-
-					if (IsAddressEqual(phys_buffer.QuadPart, (LONGLONG)target_physicaladdress))
-					{
-						DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "Physical Memory PTE pointing to %s(%llx, %llx)\n",
-							PsGetProcessImageFileName(target_process),
-							pml4[pml4_index].PageFrameNumber << PAGE_SHIFT,
-							phys_buffer.QuadPart
-						);
-					}
-
-					
-				}
-				
-
-			}
-		}
-	}
-}
-
 VOID
 DriverUnload(
 	_In_ struct _DRIVER_OBJECT* DriverObject
@@ -566,7 +390,6 @@ NTSTATUS system_thread(void)
 
 
 	QWORD target_game = 0;
-	QWORD target_physicaladdress = 0;
 
 	while (gExitCalled == 0) {
 
@@ -575,54 +398,12 @@ NTSTATUS system_thread(void)
 		
 
 		if (target_game == 0 || PsGetProcessExitProcessCalled((PEPROCESS)target_game)) {
-			target_physicaladdress = 0;
 			target_game    = GetProcessByName(TARGET_PROCESS);
 
 			if (target_game == 0)
 				goto skip_address;
 		}
 
-
-		if (target_physicaladdress == 0) {
-			KAPC_STATE state;
-			BOOL was_attached = 0;
-
-			__try {
-			
-				KeStackAttachProcess((PRKPROCESS)target_game, &state);
-
-				was_attached = 1;
-
-				QWORD client_dll = GetModuleByName(target_game, TARGET_MODULE);
-
-				if (client_dll == 0)
-					goto E0;
-
-
-				QWORD temporary_address = client_dll + TARGET_MODULEADDRESS;
-				PHYSICAL_ADDRESS entity_0 = MmGetPhysicalAddress((PVOID)temporary_address);
-				target_physicaladdress = entity_0.QuadPart;
-			E0:
-				KeUnstackDetachProcess(&state);
-
-			
-			} __except (1) {
-
-				if (was_attached)
-				{
-					KeUnstackDetachProcess(&state);
-				}
-
-			}
-
-			if (target_physicaladdress) {
-
-				DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "[+] Anti-Cheat target physical address: %llx\n",
-					target_physicaladdress
-				);
-
-			}
-		}
 
 
 
@@ -634,13 +415,6 @@ NTSTATUS system_thread(void)
 		 * Detect virtual memory access for our target game
 		 */
 		ThreadDetection(target_game);
-
-		/*
-		 * Detect physical memory access for our target game
-		 */
-		if (target_game && target_physicaladdress)
-			PteDetection(target_game, target_physicaladdress);
-
 
 	}
 
