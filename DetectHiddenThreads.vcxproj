@@ -194,9 +194,6 @@
     <ClCompile Include="main.c" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="ia32.h" />
-  </ItemGroup>
-  <ItemGroup>
     <MASM Include="mouse.asm" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

@@ -13,7 +13,6 @@
 
 #include <intrin.h>
 #include <ntifs.h>
-#include "ia32.h"
 
 
 
