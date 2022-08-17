@@ -21,6 +21,7 @@
 
 
 
+
 #ifndef CUSTOMTYPES
 #define CUSTOMTYPES
 typedef ULONG_PTR QWORD;
@@ -141,7 +142,7 @@ __declspec(dllimport) PKPRCB KeQueryPrcbAddress(__in ULONG Number);
 // complete functions
 //
 BOOL IsInValidRange(QWORD address);
-BOOL GetThreadStack(QWORD thread, CONTEXT* thread_context);
+BOOL GetThreadStack(BOOL unlink_status, QWORD thread, CONTEXT* thread_context);
 
 
 
@@ -244,12 +245,30 @@ BOOL AntiCheatAttachProcessDetection(QWORD target_game, QWORD thread)
 	return attach;
 }
 
+__declspec(dllimport)
+PVOID RtlLookupFunctionEntry (
+    IN ULONGLONG ControlPc,
+    OUT PULONGLONG ImageBase,
+    OUT PULONGLONG TargetGp
+    );
+
+
+
+
 BOOL AntiCheatInvalidRangeDetection(QWORD thread, CONTEXT ctx)
 {
 	BOOL invalid_range = 0;
 
 	if (thread == 0)
 		return 0;
+
+
+	if (!PsIsSystemThread((PETHREAD)thread))
+	{
+		// Temporary whitelisting non system threads
+		// until proper validations for some calls
+		return 0;
+	}
 
 
 	QWORD host_process = *(QWORD*)(thread + 0x220);
@@ -266,6 +285,11 @@ BOOL AntiCheatInvalidRangeDetection(QWORD thread, CONTEXT ctx)
 		}
 	}
 
+	if (valid_range)
+	{
+		DbgPrintEx(0x71, 0, "Yippii\n");
+	}
+
 	if (!valid_range && !IsInValidRange(ctx.Rip)) {
 		DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "[%s] Thread is outside of valid module [%ld, %llx] RIP[%llx]\n",
 			PsGetProcessImageFileName(host_process),
@@ -275,6 +299,7 @@ BOOL AntiCheatInvalidRangeDetection(QWORD thread, CONTEXT ctx)
 		);
 		invalid_range = 1;
 	}
+
 
 	return invalid_range;
 }
@@ -294,12 +319,12 @@ void AntiCheat(QWORD target_game)
 		next_thread = *(QWORD*)((QWORD)prcb + 0x10);
 		if (current_thread != 0 && current_thread != (QWORD)PsGetCurrentThread())
 		{
-			AntiCheatUnlinkDetection(current_thread);
+			BOOL is_unlinked = AntiCheatUnlinkDetection(current_thread);
 			AntiCheatAttachProcessDetection(target_game, current_thread);
 
 			CONTEXT ctx;
 			ctx.ContextFlags = CONTEXT_ALL;
-			if (GetThreadStack(current_thread, &ctx)) {
+			if (GetThreadStack(is_unlinked, current_thread, &ctx)) {
 				AntiCheatInvalidRangeDetection(current_thread, ctx);
 			}
 		}
@@ -740,8 +765,8 @@ PsGetContextThread(
 	__in KPROCESSOR_MODE Mode
 );
 
-// BOOL WalkStackThread(QWORD thread_address, CONTEXT* ctx);
-BOOL GetThreadStack(QWORD thread, CONTEXT* thread_context)
+BOOL CopyStackThread(BOOL unlink_status, QWORD thread_address, CONTEXT* ctx);
+BOOL GetThreadStack(BOOL unlink_status, QWORD thread, CONTEXT* thread_context)
 {
 	BOOL status = 0;
 
@@ -756,11 +781,100 @@ BOOL GetThreadStack(QWORD thread, CONTEXT* thread_context)
 		status = 1;
 	}
 
-	// if (status == 0) { walk through thread_address + 0x58 (?) }
-	//	status = WalkStackThread(thread, thread_context);
-	//
+	if (status == 0)
+	{
+		status = CopyStackThread(unlink_status, thread, thread_context);
+	}
 
 	return status;
+}
+
+
+//
+// I'm not sure if this function really works the way we want, but it does at least something.
+// it's just assuming return address location
+//
+BOOL CopyStackThread(BOOL unlink_status, QWORD thread_address, CONTEXT *ctx)
+{
+	// portable, could be used standalone as well
+	if (thread_address == 0)
+		return 0;
+
+
+	//
+	// virtual machine is running idle loop at invalid range consistent
+	// this doesn't happen same way with real systems, so that's why it's only filtered away from vmware
+	//
+	
+	if (unlink_status == 0 && vmusbmouse.base != 0)
+	{
+		if (PsGetThreadId((PETHREAD)thread_address) <= (HANDLE)KeNumberProcessors)
+		{
+			return 0;
+		}
+	}
+	
+	(unlink_status);
+
+
+	QWORD stack_base   = *(QWORD*)(thread_address + 0x38);
+	QWORD stack_limit  = *(QWORD*)(thread_address + 0x30);
+	QWORD kernel_stack = *(QWORD*)(thread_address + 0x58);
+	QWORD stack_size   = stack_base - kernel_stack;
+
+
+	//
+	// address is not valid
+	//
+	if (MmGetPhysicalAddress((PVOID)kernel_stack).QuadPart == 0)
+	{
+		return 0;
+	}
+
+	UCHAR stack_buffer[0x48];
+	if (kernel_stack > stack_limit && kernel_stack < stack_base)
+	{
+		if (stack_size > sizeof(stack_buffer))
+		{
+			stack_size = 0x48;
+		}
+
+		MM_COPY_ADDRESS src;
+		src.VirtualAddress = (PVOID)kernel_stack;
+		if (!NT_SUCCESS(MmCopyMemory((VOID*)stack_buffer, src, stack_size, MM_COPY_MEMORY_VIRTUAL, &stack_size)))
+		{
+			stack_size = 0;
+		}
+	}
+
+	//
+	// stack copy did fail
+	//
+	if (stack_size < 0x48)
+	{
+		return 0;
+	}
+
+	//
+	// sub rsp, 0x28
+	// 
+	// call function [push address, jmp] -> _ReturnAddress to main function is potentially at RSP - 0x30
+	// 
+	// add rsp, 0x28
+	//
+
+	ctx->Rip = *(QWORD*)(&stack_buffer[0] + 0x38);
+	ctx->Rsp = *(QWORD*)(&stack_buffer[0] + 0x40);
+
+
+	//
+	// check if it's kernel address + stack
+	//
+	if (MmGetPhysicalAddress((PVOID)ctx->Rip).QuadPart == 0 || MmGetPhysicalAddress((PVOID)ctx->Rsp).QuadPart == 0)
+	{
+		return 0;
+	}
+	return 1;
 }
 
 BOOLEAN bDataCompare(const BYTE* pData, const BYTE* bMask, const char* szMask)
