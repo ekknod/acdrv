@@ -268,6 +268,7 @@ BOOL AntiCheatInvalidRangeDetection(BOOL is_unlinked, QWORD thread, CONTEXT ctx)
 	// virtual machine is running idle loop at invalid range consistent
 	// this doesn't happen same way with real systems, so that's why it's only filtered away from vmware
 	//
+	/*
 	if (is_unlinked == 0 && vmusbmouse.base != 0)
 	{
 		if (PsGetThreadId((PETHREAD)thread) <= (HANDLE)KeNumberProcessors)
@@ -275,6 +276,8 @@ BOOL AntiCheatInvalidRangeDetection(BOOL is_unlinked, QWORD thread, CONTEXT ctx)
 			return 0;
 		}
 	}
+	*/
+	(is_unlinked);
 
 
 	QWORD host_process = *(QWORD*)(thread + 0x220);
@@ -896,24 +899,23 @@ BOOL CopyStackThread(QWORD thread_address, CONTEXT *ctx)
 		return 0;
 	}
 
-	ppte pte = (ppte)MiGetPteAddress(ctx->Rip);
-	if (pte == 0)
+	ppte pte_rip = (ppte)MiGetPteAddress(ctx->Rip);
+	ppte pte_rsp = (ppte)MiGetPteAddress(ctx->Rsp);
+	if (pte_rip == 0 || pte_rsp == 0)
+	{
+		return 0;
+	}
+
+	//
+	// page is not accessable
+	//
+	if (pte_rip->present == 0 || pte_rsp->present == 0)
 	{
 		return 0;
 	}
 
 
-	//
-	// page is not executable
-	//
-	if (pte->nx == 1)
-	{
-		return 0;
-	}
-
-
-
-	return 1;
+	return (pte_rip->nx == 0);
 }
 
 BOOLEAN bDataCompare(const BYTE* pData, const BYTE* bMask, const char* szMask)
