@@ -120,6 +120,7 @@ QWORD MouseClassServiceCallback(
 // helper functions
 //
 QWORD GetMilliSeconds();
+QWORD GetProcAddressQ(QWORD base, PCSTR name);
 QWORD FindPattern(QWORD module, BYTE* bMask, CHAR* szMask, QWORD len);
 PVOID ResolveRelativeAddress(
 	_In_ PVOID Instruction,
@@ -135,7 +136,7 @@ __declspec(dllimport) PCSTR PsGetProcessImageFileName(QWORD process);
 __declspec(dllimport) BOOLEAN PsGetProcessExitProcessCalled(PEPROCESS process);
 typedef struct _KPRCB* PKPRCB;
 __declspec(dllimport) PKPRCB KeQueryPrcbAddress(__in ULONG Number);
-
+__int64 (__fastcall *MiGetPteAddress)(unsigned __int64 a1);
 
 
 //
@@ -263,13 +264,6 @@ BOOL AntiCheatInvalidRangeDetection(QWORD thread, CONTEXT ctx)
 		return 0;
 
 
-	if (!PsIsSystemThread((PETHREAD)thread))
-	{
-		// Temporary whitelisting non system threads
-		// until proper validations for some calls
-		return 0;
-	}
-
 
 	QWORD host_process = *(QWORD*)(thread + 0x220);
 
@@ -283,11 +277,6 @@ BOOL AntiCheatInvalidRangeDetection(QWORD thread, CONTEXT ctx)
 				valid_range = 1;
 			}
 		}
-	}
-
-	if (valid_range)
-	{
-		DbgPrintEx(0x71, 0, "Yippii\n");
 	}
 
 	if (!valid_range && !IsInValidRange(ctx.Rip)) {
@@ -426,6 +415,15 @@ NTSTATUS DriverEntry(
 
 	vmusbmouse.base = GetModuleHandle(L"vmusbmouse.sys", &vmusbmouse.size);
 	QWORD ntoskrnl = GetModuleHandle(L"ntoskrnl.exe", 0);
+
+
+	QWORD MmUnlockPreChargedPagedPool = GetProcAddressQ((QWORD)ntoskrnl, "MmUnlockPreChargedPagedPool");
+	if (MmUnlockPreChargedPagedPool == 0)
+		return STATUS_DRIVER_ENTRYPOINT_NOT_FOUND;
+
+
+	*(QWORD*)&MiGetPteAddress = (QWORD)(*(int*)(MmUnlockPreChargedPagedPool + 8) + MmUnlockPreChargedPagedPool + 12);
+
 
 	QWORD table = 0;
 	if (ntoskrnl)
@@ -790,6 +788,31 @@ BOOL GetThreadStack(BOOL unlink_status, QWORD thread, CONTEXT* thread_context)
 }
 
 
+typedef union _pte
+{
+	ULONG64 value;
+	struct
+	{
+		ULONG64 present : 1;          // Must be 1, region invalid if 0.
+		ULONG64 ReadWrite : 1;        // If 0, writes not allowed.
+		ULONG64 user_supervisor : 1;   // If 0, user-mode accesses not allowed.
+		ULONG64 PageWriteThrough : 1; // Determines the memory type used to access the memory.
+		ULONG64 page_cache : 1; // Determines the memory type used to access the memory.
+		ULONG64 accessed : 1;         // If 0, this entry has not been used for translation.
+		ULONG64 Dirty : 1;            // If 0, the memory backing this page has not been written to.
+		ULONG64 PageAccessType : 1;   // Determines the memory type used to access the memory.
+		ULONG64 Global : 1;           // If 1 and the PGE bit of CR4 is set, translations are global.
+		ULONG64 Ignored2 : 3;
+		ULONG64 pfn : 36; // The page frame number of the backing physical page.
+		ULONG64 Reserved : 4;
+		ULONG64 Ignored3 : 7;
+		ULONG64 ProtectionKey : 4;  // If the PKE bit of CR4 is set, determines the protection key.
+		ULONG64 nx : 1; // If 1, instruction fetches not allowed.
+	};
+} pte_t, * ppte;
+
+
+
 //
 // I'm not sure if this function really works the way we want, but it does at least something.
 // it's just assuming return address location
@@ -874,6 +897,24 @@ BOOL CopyStackThread(BOOL unlink_status, QWORD thread_address, CONTEXT *ctx)
 	{
 		return 0;
 	}
+
+	ppte pte = (ppte)MiGetPteAddress(ctx->Rip);
+	if (pte == 0)
+	{
+		return 0;
+	}
+
+
+	//
+	// page is not executable
+	//
+	if (pte->nx == 1)
+	{
+		return 0;
+	}
+
+
+
 	return 1;
 }
 
@@ -896,6 +937,29 @@ QWORD FindPatternEx(UINT64 dwAddress, QWORD dwLen, BYTE* bMask, char* szMask)
 		if (bDataCompare((BYTE*)(dwAddress + i), bMask, szMask))
 			return (QWORD)(dwAddress + i);
 
+	return 0;
+}
+
+QWORD GetProcAddressQ(QWORD base, PCSTR name)
+{
+	QWORD a0;
+	DWORD a1[4];
+	
+	
+	a0 = base + *(USHORT*)(base + 0x3C);
+	a0 = base + *(DWORD*)(a0 + 0x88);
+	a1[0] = *(DWORD*)(a0 + 0x18);
+	a1[1] = *(DWORD*)(a0 + 0x1C);
+	a1[2] = *(DWORD*)(a0 + 0x20);
+	a1[3] = *(DWORD*)(a0 + 0x24);
+	while (a1[0]--) {
+		
+		a0 = base + *(DWORD*)(base + a1[2] + (a1[0] * 4));
+		if (strcmp((PCSTR)a0, name) == 0) {
+			return (base + *(DWORD*)(base + a1[1] + (*(USHORT*)(base + a1[3] + (a1[0] * 2)) * 4)));
+		}
+		
+	}
 	return 0;
 }
 
