@@ -831,12 +831,12 @@ BOOL CopyStackThread(BOOL unlink_status, QWORD thread_address, CONTEXT *ctx)
 		return 0;
 	}
 
-	UCHAR stack_buffer[0x48];
+	UCHAR stack_buffer[0x40];
 	if (kernel_stack > stack_limit && kernel_stack < stack_base)
 	{
 		if (stack_size > sizeof(stack_buffer))
 		{
-			stack_size = 0x48;
+			stack_size = 0x40;
 		}
 
 		MM_COPY_ADDRESS src;
@@ -850,7 +850,7 @@ BOOL CopyStackThread(BOOL unlink_status, QWORD thread_address, CONTEXT *ctx)
 	//
 	// stack copy did fail
 	//
-	if (stack_size < 0x48)
+	if (stack_size < 0x40)
 	{
 		return 0;
 	}
@@ -863,8 +863,8 @@ BOOL CopyStackThread(BOOL unlink_status, QWORD thread_address, CONTEXT *ctx)
 	// add rsp, 0x28
 	//
 
-	ctx->Rip = *(QWORD*)(&stack_buffer[0] + 0x38);
-	ctx->Rsp = *(QWORD*)(&stack_buffer[0] + 0x40);
+	ctx->Rip = *(QWORD*)(&stack_buffer[0] + 0x30);
+	ctx->Rsp = *(QWORD*)(&stack_buffer[0] + 0x38);
 
 
 	//
