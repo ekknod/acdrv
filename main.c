@@ -143,7 +143,7 @@ __int64 (__fastcall *MiGetPteAddress)(unsigned __int64 a1);
 // complete functions
 //
 BOOL IsInValidRange(QWORD address);
-BOOL GetThreadStack(BOOL unlink_status, QWORD thread, CONTEXT* thread_context);
+BOOL GetThreadStack(QWORD thread, CONTEXT* thread_context);
 
 
 
@@ -256,7 +256,7 @@ PVOID RtlLookupFunctionEntry (
 
 
 
-BOOL AntiCheatInvalidRangeDetection(QWORD thread, CONTEXT ctx)
+BOOL AntiCheatInvalidRangeDetection(BOOL is_unlinked, QWORD thread, CONTEXT ctx)
 {
 	BOOL invalid_range = 0;
 
@@ -264,9 +264,20 @@ BOOL AntiCheatInvalidRangeDetection(QWORD thread, CONTEXT ctx)
 		return 0;
 
 
+	//
+	// virtual machine is running idle loop at invalid range consistent
+	// this doesn't happen same way with real systems, so that's why it's only filtered away from vmware
+	//
+	if (is_unlinked == 0 && vmusbmouse.base != 0)
+	{
+		if (PsGetThreadId((PETHREAD)thread) <= (HANDLE)KeNumberProcessors)
+		{
+			return 0;
+		}
+	}
+
 
 	QWORD host_process = *(QWORD*)(thread + 0x220);
-
 	BOOL valid_range = 0;
 	if (HalEfiEnabled)
 	{
@@ -311,10 +322,13 @@ void AntiCheat(QWORD target_game)
 			BOOL is_unlinked = AntiCheatUnlinkDetection(current_thread);
 			AntiCheatAttachProcessDetection(target_game, current_thread);
 
+
+
+
 			CONTEXT ctx;
 			ctx.ContextFlags = CONTEXT_ALL;
-			if (GetThreadStack(is_unlinked, current_thread, &ctx)) {
-				AntiCheatInvalidRangeDetection(current_thread, ctx);
+			if (GetThreadStack(current_thread, &ctx)) {
+				AntiCheatInvalidRangeDetection(is_unlinked, current_thread, ctx);
 			}
 		}
 
@@ -763,8 +777,8 @@ PsGetContextThread(
 	__in KPROCESSOR_MODE Mode
 );
 
-BOOL CopyStackThread(BOOL unlink_status, QWORD thread_address, CONTEXT* ctx);
-BOOL GetThreadStack(BOOL unlink_status, QWORD thread, CONTEXT* thread_context)
+BOOL CopyStackThread(QWORD thread_address, CONTEXT* ctx);
+BOOL GetThreadStack(QWORD thread, CONTEXT* thread_context)
 {
 	BOOL status = 0;
 
@@ -781,7 +795,7 @@ BOOL GetThreadStack(BOOL unlink_status, QWORD thread, CONTEXT* thread_context)
 
 	if (status == 0)
 	{
-		status = CopyStackThread(unlink_status, thread, thread_context);
+		status = CopyStackThread(thread, thread_context);
 	}
 
 	return status;
@@ -817,27 +831,11 @@ typedef union _pte
 // I'm not sure if this function really works the way we want, but it does at least something.
 // it's just assuming return address location
 //
-BOOL CopyStackThread(BOOL unlink_status, QWORD thread_address, CONTEXT *ctx)
+BOOL CopyStackThread(QWORD thread_address, CONTEXT *ctx)
 {
 	// portable, could be used standalone as well
 	if (thread_address == 0)
 		return 0;
-
-
-	//
-	// virtual machine is running idle loop at invalid range consistent
-	// this doesn't happen same way with real systems, so that's why it's only filtered away from vmware
-	//
-	
-	if (unlink_status == 0 && vmusbmouse.base != 0)
-	{
-		if (PsGetThreadId((PETHREAD)thread_address) <= (HANDLE)KeNumberProcessors)
-		{
-			return 0;
-		}
-	}
-	
-	(unlink_status);
 
 
 	QWORD stack_base   = *(QWORD*)(thread_address + 0x38);
