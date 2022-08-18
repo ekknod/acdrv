@@ -157,14 +157,7 @@ QWORD MouseClassServiceCallbackHook(
 	PULONG InputDataConsumed
 )
 {
-	(DeviceObject);
-	(InputDataStart);
-	(InputDataEnd);
-	(InputDataConsumed);
-
 	QWORD address = (QWORD)_ReturnAddress();
-
-
 	if (address < (QWORD)gMouseObject.hid || address >(QWORD)((QWORD)gMouseObject.hid + gMouseObject.hid_length))
 	{
 		// extra check for vmware virtual machine
@@ -246,17 +239,7 @@ BOOL AntiCheatAttachProcessDetection(QWORD target_game, QWORD thread)
 	return attach;
 }
 
-__declspec(dllimport)
-PVOID RtlLookupFunctionEntry (
-    IN ULONGLONG ControlPc,
-    OUT PULONGLONG ImageBase,
-    OUT PULONGLONG TargetGp
-    );
-
-
-
-
-BOOL AntiCheatInvalidRangeDetection(BOOL is_unlinked, QWORD thread, CONTEXT ctx)
+BOOL AntiCheatInvalidRangeDetection(QWORD thread, CONTEXT ctx)
 {
 	BOOL invalid_range = 0;
 
@@ -264,36 +247,9 @@ BOOL AntiCheatInvalidRangeDetection(BOOL is_unlinked, QWORD thread, CONTEXT ctx)
 		return 0;
 
 
-	//
-	// virtual machine is running idle loop at invalid range consistent
-	// this doesn't happen same way with real systems, so that's why it's only filtered away from vmware
-	//
-	/*
-	if (is_unlinked == 0 && vmusbmouse.base != 0)
-	{
-		if (PsGetThreadId((PETHREAD)thread) <= (HANDLE)KeNumberProcessors)
-		{
-			return 0;
-		}
-	}
-	*/
-	(is_unlinked);
-
-
-	QWORD host_process = *(QWORD*)(thread + 0x220);
-	BOOL valid_range = 0;
-	if (HalEfiEnabled)
-	{
-		for (int i = 0; i < 8; i++)
-		{
-			if (ctx.Rip >= HalEfiImages[i].base && ctx.Rip <= (QWORD)(HalEfiImages[i].base + HalEfiImages[i].size))
-			{
-				valid_range = 1;
-			}
-		}
-	}
-
-	if (!valid_range && !IsInValidRange(ctx.Rip)) {
+	
+	if (!IsInValidRange(ctx.Rip)) {
+		QWORD host_process = *(QWORD*)(thread + 0x220);
 		DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "[%s] Thread is outside of valid module [%ld, %llx] RIP[%llx]\n",
 			PsGetProcessImageFileName(host_process),
 			(DWORD)(QWORD)PsGetThreadId((PETHREAD)thread),
@@ -322,16 +278,12 @@ void AntiCheat(QWORD target_game)
 		next_thread = *(QWORD*)((QWORD)prcb + 0x10);
 		if (current_thread != 0 && current_thread != (QWORD)PsGetCurrentThread())
 		{
-			BOOL is_unlinked = AntiCheatUnlinkDetection(current_thread);
 			AntiCheatAttachProcessDetection(target_game, current_thread);
-
-
-
 
 			CONTEXT ctx;
 			ctx.ContextFlags = CONTEXT_ALL;
 			if (GetThreadStack(current_thread, &ctx)) {
-				AntiCheatInvalidRangeDetection(is_unlinked, current_thread, ctx);
+				AntiCheatInvalidRangeDetection(current_thread, ctx);
 			}
 		}
 
@@ -523,6 +475,20 @@ typedef struct _KLDR_DATA_TABLE_ENTRY {
 
 BOOL IsInValidRange(QWORD address)
 {
+	
+	if (HalEfiEnabled)
+	{
+		for (int i = 0; i < 8; i++)
+		{
+			if (address >= HalEfiImages[i].base && address <= (QWORD)(HalEfiImages[i].base + HalEfiImages[i].size))
+			{
+				return 1;
+			}
+		}
+	}
+
+	
+
 	PLDR_DATA_TABLE_ENTRY ldr = (PLDR_DATA_TABLE_ENTRY)gDriverObject->DriverSection;
 	for (PLIST_ENTRY pListEntry = ldr->InLoadOrderLinks.Flink; pListEntry != &ldr->InLoadOrderLinks; pListEntry = pListEntry->Flink)
 	{
@@ -789,9 +755,7 @@ BOOL GetThreadStack(QWORD thread, CONTEXT* thread_context)
 		return 0;
 
 
-
 	MISC_FLAGS* flags = (MISC_FLAGS*)(thread + 0x74);
-
 	if (flags->ApcQueueable == 1 && *(SHORT*)(thread + 0x1e6) == 0 && NT_SUCCESS(PsGetContextThread((PETHREAD)thread, thread_context, KernelMode))) {
 		status = 1;
 	}
@@ -829,12 +793,124 @@ typedef union _pte
 } pte_t, * ppte;
 
 
+#pragma warning (disable: 4996)
 
-//
-// I'm not sure if this function really works the way we want, but it does at least something.
-// it's just assuming return address location
-//
 BOOL CopyStackThread(QWORD thread_address, CONTEXT *ctx)
+{
+	// portable, could be used standalone as well
+	if (thread_address == 0)
+		return 0;
+
+
+	QWORD stack_base   = *(QWORD*)(thread_address + 0x38);
+	QWORD stack_limit  = *(QWORD*)(thread_address + 0x30);
+	QWORD kernel_stack = *(QWORD*)(thread_address + 0x58);
+	QWORD stack_size   = stack_base - kernel_stack;
+
+	if (stack_size < 80)
+	{
+		return 0;
+	}
+
+
+	//
+	// stack address is not valid
+	//
+	if (MmGetPhysicalAddress((PVOID)kernel_stack).QuadPart == 0)
+	{
+		return 0;
+	}
+
+	
+	UCHAR stack_buffer[200];
+	if (kernel_stack > stack_limit && kernel_stack < stack_base)
+	{
+		if (stack_size > sizeof(stack_buffer))
+		{
+			stack_size = sizeof(stack_buffer);
+		}
+
+
+		MM_COPY_ADDRESS src;
+		src.VirtualAddress = (PVOID)kernel_stack;
+		if (!NT_SUCCESS(MmCopyMemory((VOID*)stack_buffer, src, stack_size, MM_COPY_MEMORY_VIRTUAL, &stack_size)))
+		{
+			stack_size = 0;
+		}
+	}
+
+
+	//
+	// stack copy did fail
+	//
+	if (stack_size < sizeof(stack_buffer))
+	{
+		return 0;
+	}
+
+
+	//
+	// validate 25 addresses from the thread stack
+	//
+	ctx->Rip = 0;
+	for (int i = 0; i < sizeof(stack_buffer) / 8; i++)
+	{
+		QWORD address = ((QWORD*)(&stack_buffer[0]))[i];
+		if (address == 0)
+		{
+			continue;
+		}
+
+		if (MmGetPhysicalAddress((PVOID)address).QuadPart != 0)
+		{
+
+			ppte pte = (ppte)MiGetPteAddress(address);
+			if (pte == 0)
+			{
+				continue;
+			}
+
+			//
+			// PTE doesn't exists
+			//
+			if (pte->present == 0)
+			{
+				continue;
+			}
+
+			//
+			// page is not executable
+			//
+			if (pte->nx == 1)
+			{
+				continue;
+			}
+
+			//
+			// Whenever the processor accesses a page, it automatically sets the A (Accessed) bit in the corresponding PTE = 1
+			//
+			if (pte->accessed == 0)
+			{
+				continue;
+			}
+
+			if (!IsInValidRange(address))
+			{
+				ctx->Rip = address;
+			}
+		}
+	}
+
+	if (ctx->Rip == 0)
+	{
+		return 0;
+	}
+	
+	return 1;
+}
+
+/*
+BOOL CopyStackThreadOld(QWORD thread_address, CONTEXT *ctx)
 {
 	// portable, could be used standalone as well
 	if (thread_address == 0)
@@ -914,9 +990,14 @@ BOOL CopyStackThread(QWORD thread_address, CONTEXT *ctx)
 		return 0;
 	}
 
+	if (pte_rip->accessed == 0)
+	{
+		return 0;
+	}
 
 	return (pte_rip->nx == 0);
 }
+*/
 
 BOOLEAN bDataCompare(const BYTE* pData, const BYTE* bMask, const char* szMask)
 {
