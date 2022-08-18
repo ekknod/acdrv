@@ -807,7 +807,7 @@ BOOL CopyStackThread(QWORD thread_address, CONTEXT *ctx)
 	QWORD kernel_stack = *(QWORD*)(thread_address + 0x58);
 	QWORD stack_size   = stack_base - kernel_stack;
 
-	if (stack_size < 80)
+	if (stack_size < 200)
 	{
 		return 0;
 	}
