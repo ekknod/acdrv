@@ -136,7 +136,7 @@ __declspec(dllimport) PCSTR PsGetProcessImageFileName(QWORD process);
 __declspec(dllimport) BOOLEAN PsGetProcessExitProcessCalled(PEPROCESS process);
 typedef struct _KPRCB* PKPRCB;
 __declspec(dllimport) PKPRCB KeQueryPrcbAddress(__in ULONG Number);
-__int64 (__fastcall *MiGetPteAddress)(unsigned __int64 a1);
+__int64(__fastcall* MiGetPteAddress)(unsigned __int64 a1);
 
 
 //
@@ -166,7 +166,7 @@ QWORD MouseClassServiceCallbackHook(
 			QWORD thread = (QWORD)PsGetCurrentThread();
 
 			DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
-				"Mouse manipulation was detected (%ld, %llx)\n",
+				" Mouse manipulation was detected (%ld, %llx)\n",
 				(DWORD)(QWORD)PsGetThreadId((PETHREAD)thread),
 				thread
 			);
@@ -193,6 +193,21 @@ BOOL AntiCheatUnlinkDetection(QWORD thread)
 		return 0;
 
 	QWORD host_process = *(QWORD*)(thread + 0x220);
+
+
+
+	QWORD lookup_thread;
+	if (NT_SUCCESS(PsLookupThreadByThreadId(
+		(HANDLE)PsGetThreadId((PETHREAD)thread),
+		(PETHREAD*)&lookup_thread
+	)))
+	{
+		if (lookup_thread == thread)
+		{
+			return 0;
+		}
+	}
+
 	if (!IsThreadFoundEPROCESS(host_process, thread))
 	{
 		DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "Hidden thread found [%s %d], %llx, %d]\n",
@@ -247,10 +262,10 @@ BOOL AntiCheatInvalidRangeDetection(QWORD thread, CONTEXT ctx)
 		return 0;
 
 
-	
+
 	if (!IsInValidRange(ctx.Rip)) {
 		QWORD host_process = *(QWORD*)(thread + 0x220);
-		DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "[%s] Thread is outside of valid module [%ld, %llx] RIP[%llx]\n",
+		DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "[%s] Thread is executing outside of valid module [%ld, %llx] RIP[%llx]\n",
 			PsGetProcessImageFileName(host_process),
 			(DWORD)(QWORD)PsGetThreadId((PETHREAD)thread),
 			thread,
@@ -417,10 +432,10 @@ NTSTATUS DriverEntry(
 
 	if (HalEfiEnabled && HalEfiFunctions[0] != 0)
 	{
-		
+
 		for (int i = 0; i < 8; i++)
 		{
-			
+
 			if (!ResolveHalEfiBase(HalEfiFunctions[i], &HalEfiImages[i].base, &HalEfiImages[i].size))
 			{
 				HalEfiEnabled = 0;
@@ -429,16 +444,16 @@ NTSTATUS DriverEntry(
 
 			if (HalEfiFunctions[i] && *(unsigned short*)(HalEfiFunctions[i]) == 0x25ff)
 			{
-				DbgPrintEx(0x71, 0, "[+] EFI Runtime service (%d) is most likely manipulated by bytepatch: %llx\n",
+				DbgPrintEx(0x71, 0, " EFI Runtime service (%d) is most likely manipulated by bytepatch: %llx\n",
 					i, *(QWORD*)(HalEfiFunctions[i] + 0x6));
 			}
 
 			if (HalEfiEnabled == 0)
 				continue;
-			
+
 			if (HalEfiFunctions[i] < HalEfiImages[i].base || HalEfiFunctions[i] > (HalEfiImages[i].base + HalEfiImages[i].size))
 			{
-				DbgPrintEx(0x71, 0, "[+] EFI Runtime service (%d) is not pointing at original Image: %llx\n", i, HalEfiFunctions[i]);
+				DbgPrintEx(0x71, 0, " EFI Runtime service (%d) is not pointing at original Image: %llx\n", i, HalEfiFunctions[i]);
 			}
 		}
 	}
@@ -475,7 +490,7 @@ typedef struct _KLDR_DATA_TABLE_ENTRY {
 
 BOOL IsInValidRange(QWORD address)
 {
-	
+
 	if (HalEfiEnabled)
 	{
 		for (int i = 0; i < 8; i++)
@@ -487,7 +502,7 @@ BOOL IsInValidRange(QWORD address)
 		}
 	}
 
-	
+
 
 	PLDR_DATA_TABLE_ENTRY ldr = (PLDR_DATA_TABLE_ENTRY)gDriverObject->DriverSection;
 	for (PLIST_ENTRY pListEntry = ldr->InLoadOrderLinks.Flink; pListEntry != &ldr->InLoadOrderLinks; pListEntry = pListEntry->Flink)
@@ -754,20 +769,25 @@ BOOL GetThreadStack(QWORD thread, CONTEXT* thread_context)
 	if (thread == 0)
 		return 0;
 
-
-	MISC_FLAGS* flags = (MISC_FLAGS*)(thread + 0x74);
-	if (flags->ApcQueueable == 1 && *(SHORT*)(thread + 0x1e6) == 0 && NT_SUCCESS(PsGetContextThread((PETHREAD)thread, thread_context, KernelMode))) {
-		status = 1;
-	}
-
+	status = CopyStackThread(thread, thread_context);
 	if (status == 0)
 	{
-		status = CopyStackThread(thread, thread_context);
+		return 0;
+		/*
+		
+		this is slow, so it will be used later with scans towards suspect_list[] items only
+
+		MISC_FLAGS* flags = (MISC_FLAGS*)(thread + 0x74);
+		if (flags->ApcQueueable == 1 && *(SHORT*)(thread + 0x1e6) == 0 &&
+			NT_SUCCESS(PsGetContextThread((PETHREAD)thread, thread_context, KernelMode)))
+		{
+			status = 1;
+		}
+		*/
 	}
 
 	return status;
 }
-
 
 typedef union _pte
 {
@@ -795,17 +815,18 @@ typedef union _pte
 
 #pragma warning (disable: 4996)
 
-BOOL CopyStackThread(QWORD thread_address, CONTEXT *ctx)
+
+BOOL CopyStackThread(QWORD thread_address, CONTEXT* ctx)
 {
 	// portable, could be used standalone as well
 	if (thread_address == 0)
 		return 0;
 
 
-	QWORD stack_base   = *(QWORD*)(thread_address + 0x38);
-	QWORD stack_limit  = *(QWORD*)(thread_address + 0x30);
+	QWORD stack_base = *(QWORD*)(thread_address + 0x38);
+	QWORD stack_limit = *(QWORD*)(thread_address + 0x30);
 	QWORD kernel_stack = *(QWORD*)(thread_address + 0x58);
-	QWORD stack_size   = stack_base - kernel_stack;
+	QWORD stack_size = stack_base - kernel_stack;
 
 	if (stack_size < 200)
 	{
@@ -821,7 +842,7 @@ BOOL CopyStackThread(QWORD thread_address, CONTEXT *ctx)
 		return 0;
 	}
 
-	
+
 	UCHAR stack_buffer[200];
 	if (kernel_stack > stack_limit && kernel_stack < stack_base)
 	{
@@ -849,6 +870,7 @@ BOOL CopyStackThread(QWORD thread_address, CONTEXT *ctx)
 	}
 
 
+	QWORD previous_address=0;
 	//
 	// validate 25 addresses from the thread stack
 	//
@@ -898,19 +920,26 @@ BOOL CopyStackThread(QWORD thread_address, CONTEXT *ctx)
 			{
 				ctx->Rip = address;
 			}
+			previous_address = address;
 		}
 	}
 
-	if (ctx->Rip == 0)
+	if (previous_address == 0)
 	{
 		return 0;
 	}
 	
+	if (ctx->Rip == 0)
+	{
+		ctx->Rip = previous_address;
+	}
+
 	return 1;
 }
 
+
 /*
-BOOL CopyStackThreadOld(QWORD thread_address, CONTEXT *ctx)
+BOOL CopyStackThread(QWORD thread_address, CONTEXT *ctx)
 {
 	// portable, could be used standalone as well
 	if (thread_address == 0)
@@ -957,9 +986,9 @@ BOOL CopyStackThreadOld(QWORD thread_address, CONTEXT *ctx)
 
 	//
 	// sub rsp, 0x28
-	// 
+	//
 	// call function [push address, jmp] -> _ReturnAddress to main function is potentially at RSP - 0x30
-	// 
+	//
 	// add rsp, 0x28
 	//
 
@@ -999,6 +1028,7 @@ BOOL CopyStackThreadOld(QWORD thread_address, CONTEXT *ctx)
 }
 */
 
+
 BOOLEAN bDataCompare(const BYTE* pData, const BYTE* bMask, const char* szMask)
 {
 
@@ -1025,8 +1055,8 @@ QWORD GetProcAddressQ(QWORD base, PCSTR name)
 {
 	QWORD a0;
 	DWORD a1[4];
-	
-	
+
+
 	a0 = base + *(USHORT*)(base + 0x3C);
 	a0 = base + *(DWORD*)(a0 + 0x88);
 	a1[0] = *(DWORD*)(a0 + 0x18);
@@ -1034,12 +1064,12 @@ QWORD GetProcAddressQ(QWORD base, PCSTR name)
 	a1[2] = *(DWORD*)(a0 + 0x20);
 	a1[3] = *(DWORD*)(a0 + 0x24);
 	while (a1[0]--) {
-		
+
 		a0 = base + *(DWORD*)(base + a1[2] + (a1[0] * 4));
 		if (strcmp((PCSTR)a0, name) == 0) {
 			return (base + *(DWORD*)(base + a1[1] + (*(USHORT*)(base + a1[3] + (a1[0] * 2)) * 4)));
 		}
-		
+
 	}
 	return 0;
 }
