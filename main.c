@@ -882,7 +882,8 @@ BOOL CopyStackThread(QWORD thread_address, CONTEXT* ctx)
 
 		if (address < (QWORD)0xfffff00000000000)
 		{
-			continue;
+			if (PsGetThreadId((PETHREAD)thread_address) <= (HANDLE)KeNumberProcessors)
+				continue;
 		}
 
 		if (MmGetPhysicalAddress((PVOID)address).QuadPart != 0)
@@ -906,6 +907,14 @@ BOOL CopyStackThread(QWORD thread_address, CONTEXT* ctx)
 			// page is not executable
 			//
 			if (pte->nx == 1)
+			{
+				continue;
+			}
+
+			//
+			// Whenever the processor accesses a page, it automatically sets the A (Accessed) bit in the corresponding PTE = 1
+			//
+			if (pte->accessed == 0)
 			{
 				continue;
 			}
