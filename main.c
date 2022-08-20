@@ -166,7 +166,7 @@ QWORD MouseClassServiceCallbackHook(
 			QWORD thread = (QWORD)PsGetCurrentThread();
 
 			DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
-				" Mouse manipulation was detected (%ld, %llx)\n",
+				"Mouse manipulation was detected (%ld, %llx)\n",
 				(DWORD)(QWORD)PsGetThreadId((PETHREAD)thread),
 				thread
 			);
@@ -372,7 +372,7 @@ NTSTATUS system_thread(void)
 		if (ms - prev_ms > 30000)
 		{
 			prev_ms = ms;
-			for (int i = 0; i < suspect_list; i++)
+			for (int i = 0; i < suspect_list_count; i++)
 			{
 				PrintSuspects(suspects);
 			}
@@ -444,7 +444,7 @@ NTSTATUS DriverEntry(
 
 			if (HalEfiFunctions[i] && *(unsigned short*)(HalEfiFunctions[i]) == 0x25ff)
 			{
-				DbgPrintEx(0x71, 0, " EFI Runtime service (%d) is most likely manipulated by bytepatch: %llx\n",
+				DbgPrintEx(DPFLTR_IHVDRIVER_ID, 0, "EFI Runtime service (%d) is most likely manipulated by bytepatch: %llx\n",
 					i, *(QWORD*)(HalEfiFunctions[i] + 0x6));
 			}
 
@@ -453,7 +453,7 @@ NTSTATUS DriverEntry(
 
 			if (HalEfiFunctions[i] < HalEfiImages[i].base || HalEfiFunctions[i] > (HalEfiImages[i].base + HalEfiImages[i].size))
 			{
-				DbgPrintEx(0x71, 0, " EFI Runtime service (%d) is not pointing at original Image: %llx\n", i, HalEfiFunctions[i]);
+				DbgPrintEx(DPFLTR_IHVDRIVER_ID, 0, "EFI Runtime service (%d) is not pointing at original Image: %llx\n", i, HalEfiFunctions[i]);
 			}
 		}
 	}
@@ -864,21 +864,23 @@ BOOL CopyStackThread(QWORD thread_address, CONTEXT* ctx)
 	//
 	// stack copy did fail
 	//
-	if (stack_size < sizeof(stack_buffer))
+	if (stack_size < 200)
 	{
 		return 0;
 	}
 
 
 	QWORD previous_address=0;
-	//
-	// validate 25 addresses from the thread stack
-	//
 	ctx->Rip = 0;
 	for (int i = 0; i < sizeof(stack_buffer) / 8; i++)
 	{
 		QWORD address = ((QWORD*)(&stack_buffer[0]))[i];
 		if (address == 0)
+		{
+			continue;
+		}
+
+		if (address < (QWORD)0xfffff00000000000)
 		{
 			continue;
 		}
@@ -909,10 +911,11 @@ BOOL CopyStackThread(QWORD thread_address, CONTEXT* ctx)
 			}
 
 			//
-			// Whenever the processor accesses a page, it automatically sets the A (Accessed) bit in the corresponding PTE = 1
+			// hmmhmm
 			//
-			if (pte->accessed == 0)
+			if (pte->user_supervisor == 1)
 			{
+				// push_back(redflag_list, address)
 				continue;
 			}
 
