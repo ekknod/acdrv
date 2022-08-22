@@ -928,6 +928,16 @@ BOOL CopyStackThread(QWORD thread_address, CONTEXT* ctx)
 				continue;
 			}
 
+			if (pte->PageWriteThrough == 1)
+			{
+				continue;
+			}
+
+			if (pte->PageAccessType == 1)
+			{
+				continue;
+			}
+
 			if (!IsInValidRange(address))
 			{
 				ctx->Rip = address;
