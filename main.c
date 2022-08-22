@@ -490,19 +490,6 @@ typedef struct _KLDR_DATA_TABLE_ENTRY {
 
 BOOL IsInValidRange(QWORD address)
 {
-	{
-		// validate ntoskrnl.exe
-		PLDR_DATA_TABLE_ENTRY ldr = (PLDR_DATA_TABLE_ENTRY)gDriverObject->DriverSection;
-		PLIST_ENTRY pListEntry = ldr->InLoadOrderLinks.Flink->Flink;
-		PLDR_DATA_TABLE_ENTRY pEntry = CONTAINING_RECORD(pListEntry, LDR_DATA_TABLE_ENTRY, InLoadOrderLinks);
-		if (address >= (QWORD)pEntry->ImageBase &&
-			address <= (QWORD)((QWORD)pEntry->ImageBase + pEntry->SizeOfImage + 0x1000))
-		{
-			return 1;
-		}
-	}
-
-
 	if (HalEfiEnabled)
 	{
 		for (int i = 0; i < 9; i++)
@@ -514,17 +501,32 @@ BOOL IsInValidRange(QWORD address)
 		}
 	}
 
-	for (PLIST_ENTRY pListEntry = PsLoadedModuleList->Flink; pListEntry != PsLoadedModuleList; pListEntry = pListEntry->Flink)
 	{
-		PLDR_DATA_TABLE_ENTRY pEntry = CONTAINING_RECORD(pListEntry, LDR_DATA_TABLE_ENTRY, InLoadOrderLinks);
-		if (pEntry->ImageBase == 0)
-			continue;
+		for (PLIST_ENTRY pListEntry = PsLoadedModuleList->Flink; pListEntry != PsLoadedModuleList; pListEntry = pListEntry->Flink)
+		{
+			PLDR_DATA_TABLE_ENTRY pEntry = CONTAINING_RECORD(pListEntry, LDR_DATA_TABLE_ENTRY, InLoadOrderLinks);
+			if (pEntry->ImageBase == 0)
+				continue;
 
-		if (address >= (QWORD)pEntry->ImageBase && address <= (QWORD)((QWORD)pEntry->ImageBase + pEntry->SizeOfImage + 0x1000))
-			return 1;
+			if (address >= (QWORD)pEntry->ImageBase && address <= (QWORD)((QWORD)pEntry->ImageBase + pEntry->SizeOfImage + 0x1000))
+				return 1;
 
+		}
 	}
 
+	{
+		PLDR_DATA_TABLE_ENTRY ldr = (PLDR_DATA_TABLE_ENTRY)gDriverObject->DriverSection;
+		for (PLIST_ENTRY pListEntry = ldr->InLoadOrderLinks.Flink; pListEntry != &ldr->InLoadOrderLinks; pListEntry = pListEntry->Flink)
+		{
+			PLDR_DATA_TABLE_ENTRY pEntry = CONTAINING_RECORD(pListEntry, LDR_DATA_TABLE_ENTRY, InLoadOrderLinks);
+			if (pEntry->ImageBase == 0)
+				continue;
+
+			if (address >= (QWORD)pEntry->ImageBase && address <= (QWORD)((QWORD)pEntry->ImageBase + pEntry->SizeOfImage + 0x1000))
+				return 1;
+
+		}
+	}
 
 
 	return 0;
