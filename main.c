@@ -39,9 +39,11 @@ typedef struct {
 
 //
 // uefi runtime services, used for whitelisting some non kernel addresses
+// this validation is not yet completely working, since some of these HalEfiFunctions are calling relative addresses sub EFI modules
 //
-QWORD            HalEfiFunctions[8];
-IMAGE_INFO_TABLE HalEfiImages[8];
+#define HAL_EFI_COUNT 9
+QWORD            HalEfiFunctions[HAL_EFI_COUNT];
+IMAGE_INFO_TABLE HalEfiImages[HAL_EFI_COUNT];
 BOOL             HalEfiEnabled = 0;
 
 
@@ -132,6 +134,7 @@ QWORD GetModuleHandle(PWCH module_name, QWORD* SizeOfImage);
 QWORD GetProcessByName(const char* process_name);
 BOOL IsThreadFoundEPROCESS(QWORD process, QWORD thread);
 void NtSleep(DWORD milliseconds);
+__declspec(dllimport) LIST_ENTRY *PsLoadedModuleList;
 __declspec(dllimport) PCSTR PsGetProcessImageFileName(QWORD process);
 __declspec(dllimport) BOOLEAN PsGetProcessExitProcessCalled(PEPROCESS process);
 typedef struct _KPRCB* PKPRCB;
@@ -260,8 +263,6 @@ BOOL AntiCheatInvalidRangeDetection(QWORD thread, CONTEXT ctx)
 
 	if (thread == 0)
 		return 0;
-
-
 
 	if (!IsInValidRange(ctx.Rip)) {
 		QWORD host_process = *(QWORD*)(thread + 0x220);
@@ -425,7 +426,7 @@ NTSTATUS DriverEntry(
 		table = (QWORD)ResolveRelativeAddress((PVOID)table, 3, 7);
 		table = *(QWORD*)table;
 		HalEfiEnabled = 1;
-		for (int i = 0; i < 8; i++) {
+		for (int i = 0; i < HAL_EFI_COUNT; i++) {
 			HalEfiFunctions[i] = *(QWORD*)(table + (i * 8));
 		}
 	}
@@ -433,7 +434,7 @@ NTSTATUS DriverEntry(
 	if (HalEfiEnabled && HalEfiFunctions[0] != 0)
 	{
 
-		for (int i = 0; i < 8; i++)
+		for (int i = 0; i < HAL_EFI_COUNT; i++)
 		{
 
 			if (!ResolveHalEfiBase(HalEfiFunctions[i], &HalEfiImages[i].base, &HalEfiImages[i].size))
@@ -493,7 +494,7 @@ BOOL IsInValidRange(QWORD address)
 
 	if (HalEfiEnabled)
 	{
-		for (int i = 0; i < 8; i++)
+		for (int i = 0; i < 9; i++)
 		{
 			if (address >= HalEfiImages[i].base && address <= (QWORD)(HalEfiImages[i].base + HalEfiImages[i].size))
 			{
@@ -502,10 +503,7 @@ BOOL IsInValidRange(QWORD address)
 		}
 	}
 
-
-
-	PLDR_DATA_TABLE_ENTRY ldr = (PLDR_DATA_TABLE_ENTRY)gDriverObject->DriverSection;
-	for (PLIST_ENTRY pListEntry = ldr->InLoadOrderLinks.Flink; pListEntry != &ldr->InLoadOrderLinks; pListEntry = pListEntry->Flink)
+	for (PLIST_ENTRY pListEntry = PsLoadedModuleList->Flink; pListEntry != PsLoadedModuleList; pListEntry = pListEntry->Flink)
 	{
 		PLDR_DATA_TABLE_ENTRY pEntry = CONTAINING_RECORD(pListEntry, LDR_DATA_TABLE_ENTRY, InLoadOrderLinks);
 		if (pEntry->ImageBase == 0)
