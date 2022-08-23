@@ -37,6 +37,20 @@ typedef struct {
 } IMAGE_INFO_TABLE;
 
 
+typedef struct {
+	QWORD thread;
+	QWORD address;
+	QWORD count;
+	QWORD time;
+} THREAD_INFO_TABLE;
+
+
+#define           MAX_THREAD_COUNT 1000
+THREAD_INFO_TABLE g_thread_stack_list[MAX_THREAD_COUNT];
+int               g_thread_stack_list_count;
+void              push_back_stacklist(QWORD thread, QWORD address);
+THREAD_INFO_TABLE *get_stacklist_item(QWORD thread);
+
 //
 // uefi runtime services, used for whitelisting some non kernel addresses
 // this validation is not yet completely working, since some of these HalEfiFunctions are calling relative addresses sub EFI modules
@@ -59,9 +73,10 @@ IMAGE_INFO_TABLE vmusbmouse;
 // DriverEntry/DriverUnload
 //
 PDRIVER_OBJECT gDriverObject;
-PVOID thread_object;
-HANDLE thread_handle;
+PVOID   gThreadObject;
+HANDLE  gThreadHandle;
 BOOLEAN gExitCalled;
+DWORD   gCtxOffset;
 
 
 
@@ -146,7 +161,7 @@ __int64(__fastcall* MiGetPteAddress)(unsigned __int64 a1);
 // complete functions
 //
 BOOL IsInValidRange(QWORD address);
-BOOL GetThreadStack(QWORD thread, CONTEXT* thread_context);
+BOOL GetThreadStack(PKPRCB thread_prcb, CONTEXT* thread_context);
 
 
 
@@ -257,26 +272,37 @@ BOOL AntiCheatAttachProcessDetection(QWORD target_game, QWORD thread)
 	return attach;
 }
 
-BOOL AntiCheatInvalidRangeDetection(QWORD thread, CONTEXT ctx)
+#define TRIGGER_DETECTION_MS 25
+#define TRIGGER_COUNTER_COUNT 10000
+void AntiCheatInvalidRangeDetection(QWORD thread, CONTEXT ctx)
 {
-	BOOL invalid_range = 0;
-
 	if (thread == 0)
-		return 0;
+		return;
+
+	if (PsGetThreadId((PETHREAD)thread) == 0)
+		return;
 
 	if (!IsInValidRange(ctx.Rip)) {
-		QWORD host_process = *(QWORD*)(thread + 0x220);
-		DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "[%s] Thread is executing outside of valid module [%ld, %llx] RIP[%llx]\n",
-			PsGetProcessImageFileName(host_process),
-			(DWORD)(QWORD)PsGetThreadId((PETHREAD)thread),
-			thread,
-			ctx.Rip
-		);
-		invalid_range = 1;
+		THREAD_INFO_TABLE *table = get_stacklist_item(thread);
+		if (table)
+		{
+			QWORD ms = GetMilliSeconds();
+			QWORD previous_ms = table->time;
+
+			if ((ms - previous_ms < TRIGGER_DETECTION_MS) || table->count > TRIGGER_COUNTER_COUNT)
+			{
+				QWORD host_process = *(QWORD*)(thread + 0x220);
+				DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
+					"[%s] Thread is executing outside of valid module [%ld, %llx] RIP[%llx]\n",
+					PsGetProcessImageFileName(host_process),
+					(DWORD)(QWORD)PsGetThreadId((PETHREAD)thread),
+					thread,
+					ctx.Rip
+				);
+			}
+		}
+		push_back_stacklist(thread, ctx.Rip);
 	}
-
-
-	return invalid_range;
 }
 
 void AntiCheat(QWORD target_game)
@@ -298,7 +324,7 @@ void AntiCheat(QWORD target_game)
 
 			CONTEXT ctx;
 			ctx.ContextFlags = CONTEXT_ALL;
-			if (GetThreadStack(current_thread, &ctx)) {
+			if (GetThreadStack(prcb, &ctx)) {
 				AntiCheatInvalidRangeDetection(current_thread, ctx);
 			}
 		}
@@ -322,18 +348,18 @@ DriverUnload(
 
 	mouse_unhook();
 
-	if (thread_object) {
+	if (gThreadObject) {
 		KeWaitForSingleObject(
-			(PVOID)thread_object,
+			(PVOID)gThreadObject,
 			Executive,
 			KernelMode,
 			FALSE,
 			0
 		);
 
-		ObDereferenceObject(thread_object);
+		ObDereferenceObject(gThreadObject);
 
-		ZwClose(thread_handle);
+		ZwClose(gThreadHandle);
 	}
 
 
@@ -399,6 +425,15 @@ NTSTATUS DriverEntry(
 
 	vmusbmouse.base = GetModuleHandle(L"vmusbmouse.sys", &vmusbmouse.size);
 	QWORD ntoskrnl = GetModuleHandle(L"ntoskrnl.exe", 0);
+
+
+	QWORD KeBugCheckExPtr = (QWORD)KeBugCheckEx;
+	KeBugCheckExPtr = KeBugCheckExPtr + 0x23;
+	KeBugCheckExPtr = KeBugCheckExPtr + 0x03;
+	gCtxOffset      = *(DWORD*)KeBugCheckExPtr;
+
+
+
 
 
 	QWORD MmUnlockPreChargedPagedPool = GetProcAddressQ((QWORD)ntoskrnl, "MmUnlockPreChargedPagedPool");
@@ -468,13 +503,13 @@ NTSTATUS DriverEntry(
 	mouse_hook();
 
 	CLIENT_ID thread_id;
-	PsCreateSystemThread(&thread_handle, STANDARD_RIGHTS_ALL, NULL, NULL, &thread_id, (PKSTART_ROUTINE)system_thread, (PVOID)0);
+	PsCreateSystemThread(&gThreadHandle, STANDARD_RIGHTS_ALL, NULL, NULL, &thread_id, (PKSTART_ROUTINE)system_thread, (PVOID)0);
 	ObReferenceObjectByHandle(
-		thread_handle,
+		gThreadHandle,
 		THREAD_ALL_ACCESS,
 		NULL,
 		KernelMode,
-		(PVOID*)&thread_object,
+		(PVOID*)&gThreadObject,
 		NULL
 	);
 
@@ -775,304 +810,28 @@ void mouse_unhook(void)
 	}
 }
 
-
-__declspec(dllimport)
-NTSTATUS
-PsGetContextThread(
-	__in PETHREAD Thread,
-	__inout PCONTEXT ThreadContext,
-	__in KPROCESSOR_MODE Mode
-);
-
-BOOL CopyStackThread(QWORD thread_address, CONTEXT* ctx);
-BOOL GetThreadStack(QWORD thread, CONTEXT* thread_context)
+BOOL GetThreadStack(PKPRCB thread_prcb, CONTEXT* thread_context)
 {
-	BOOL status = 0;
+	BOOL  status = 0;
+	QWORD thread = *(QWORD*)((QWORD)thread_prcb + 0x8);
 
 	if (thread == 0)
 		return 0;
 
-	status = CopyStackThread(thread, thread_context);
-	if (status == 0)
-	{
+	if (PsIsSystemThread((PETHREAD)thread) == 0)
 		return 0;
-		/*
-		
-		this is slow, so it will be used later with scans towards suspect_list[] items only
 
-		MISC_FLAGS* flags = (MISC_FLAGS*)(thread + 0x74);
-		if (flags->ApcQueueable == 1 && *(SHORT*)(thread + 0x1e6) == 0 &&
-			NT_SUCCESS(PsGetContextThread((PETHREAD)thread, thread_context, KernelMode)))
-		{
-			status = 1;
-		}
-		*/
+	struct _CONTEXT *context = (struct _CONTEXT*)((QWORD)thread_prcb + gCtxOffset);
+	if (context)
+	{
+		thread_context->Rip = (QWORD)&context->Rip;
+		thread_context->Rsp = (QWORD)&context->Rsp;
+		thread_context->Rbp = (QWORD)&context->Rbp;
+
+		status = 1;
 	}
-
 	return status;
 }
-
-typedef union _pte
-{
-	ULONG64 value;
-	struct
-	{
-		ULONG64 present : 1;          // Must be 1, region invalid if 0.
-		ULONG64 ReadWrite : 1;        // If 0, writes not allowed.
-		ULONG64 user_supervisor : 1;   // If 0, user-mode accesses not allowed.
-		ULONG64 PageWriteThrough : 1; // Determines the memory type used to access the memory.
-		ULONG64 page_cache : 1; // Determines the memory type used to access the memory.
-		ULONG64 accessed : 1;         // If 0, this entry has not been used for translation.
-		ULONG64 Dirty : 1;            // If 0, the memory backing this page has not been written to.
-		ULONG64 PageAccessType : 1;   // Determines the memory type used to access the memory.
-		ULONG64 Global : 1;           // If 1 and the PGE bit of CR4 is set, translations are global.
-		ULONG64 Ignored2 : 3;
-		ULONG64 pfn : 36; // The page frame number of the backing physical page.
-		ULONG64 Reserved : 4;
-		ULONG64 Ignored3 : 7;
-		ULONG64 ProtectionKey : 4;  // If the PKE bit of CR4 is set, determines the protection key.
-		ULONG64 nx : 1; // If 1, instruction fetches not allowed.
-	};
-} pte_t, * ppte;
-
-
-#pragma warning (disable: 4996)
-
-
-BOOL CopyStackThread(QWORD thread_address, CONTEXT* ctx)
-{
-	// portable, could be used standalone as well
-	if (thread_address == 0)
-		return 0;
-
-
-	QWORD stack_base = *(QWORD*)(thread_address + 0x38);
-	QWORD stack_limit = *(QWORD*)(thread_address + 0x30);
-	QWORD kernel_stack = *(QWORD*)(thread_address + 0x58);
-	QWORD stack_size = stack_base - kernel_stack;
-
-	if (stack_size < 200)
-	{
-		return 0;
-	}
-
-
-	//
-	// stack address is not valid
-	//
-	if (MmGetPhysicalAddress((PVOID)kernel_stack).QuadPart == 0)
-	{
-		return 0;
-	}
-
-
-	UCHAR stack_buffer[200];
-	if (kernel_stack > stack_limit && kernel_stack < stack_base)
-	{
-		if (stack_size > sizeof(stack_buffer))
-		{
-			stack_size = sizeof(stack_buffer);
-		}
-
-
-		MM_COPY_ADDRESS src;
-		src.VirtualAddress = (PVOID)kernel_stack;
-		if (!NT_SUCCESS(MmCopyMemory((VOID*)stack_buffer, src, stack_size, MM_COPY_MEMORY_VIRTUAL, &stack_size)))
-		{
-			stack_size = 0;
-		}
-	}
-
-
-	//
-	// stack copy did fail
-	//
-	if (stack_size < 200)
-	{
-		return 0;
-	}
-
-
-	QWORD previous_address=0;
-	ctx->Rip = 0;
-	for (int i = 0; i < sizeof(stack_buffer) / 8; i++)
-	{
-		QWORD address = ((QWORD*)(&stack_buffer[0]))[i];
-		if (address == 0)
-		{
-			continue;
-		}
-
-		if (address < (QWORD)0xfffff00000000000)
-		{
-			if (PsGetThreadProcessId((PETHREAD)thread_address) == 0)
-				continue;
-		}
-
-		if (address >= (QWORD)gDriverObject->DriverStart && address < (QWORD)((QWORD)gDriverObject->DriverStart
-			+ gDriverObject->DriverSize
-			))
-			continue;
-		__try {
-			if (MmGetPhysicalAddress((PVOID)address).QuadPart != 0)
-			{
-
-				ppte pte = (ppte)MiGetPteAddress(address);
-				if (pte == 0)
-				{
-					continue;
-				}
-
-				//
-				// PTE is invalid
-				//
-				if (pte->present == 0)
-				{
-					continue;
-				}
-
-				//
-				// page is not executable
-				//
-				if (pte->nx == 1)
-				{
-					continue;
-				}
-
-				//
-				// Whenever the processor accesses a page, it automatically sets the A (Accessed) bit in the corresponding PTE = 1
-				//
-				if (pte->accessed == 0)
-				{
-					continue;
-				}
-
-				//
-				// hmmhmm
-				//
-				if (pte->user_supervisor == 1)
-				{
-					// push_back(redflag_list, address)
-					continue;
-				}
-
-				if (!IsInValidRange(address))
-				{
-					ctx->Rip = address;
-				}
-				previous_address = address;
-			}
-		} __except(1) {
-			//
-			// page fault exception
-			//
-		}
-	}
-
-	if (previous_address == 0)
-	{
-		return 0;
-	}
-	
-	if (ctx->Rip == 0)
-	{
-		ctx->Rip = previous_address;
-	}
-
-	return 1;
-}
-
-
-/*
-BOOL CopyStackThread(QWORD thread_address, CONTEXT *ctx)
-{
-	// portable, could be used standalone as well
-	if (thread_address == 0)
-		return 0;
-
-
-	QWORD stack_base   = *(QWORD*)(thread_address + 0x38);
-	QWORD stack_limit  = *(QWORD*)(thread_address + 0x30);
-	QWORD kernel_stack = *(QWORD*)(thread_address + 0x58);
-	QWORD stack_size   = stack_base - kernel_stack;
-
-
-	//
-	// address is not valid
-	//
-	if (MmGetPhysicalAddress((PVOID)kernel_stack).QuadPart == 0)
-	{
-		return 0;
-	}
-
-	UCHAR stack_buffer[0x40];
-	if (kernel_stack > stack_limit && kernel_stack < stack_base)
-	{
-		if (stack_size > sizeof(stack_buffer))
-		{
-			stack_size = 0x40;
-		}
-
-		MM_COPY_ADDRESS src;
-		src.VirtualAddress = (PVOID)kernel_stack;
-		if (!NT_SUCCESS(MmCopyMemory((VOID*)stack_buffer, src, stack_size, MM_COPY_MEMORY_VIRTUAL, &stack_size)))
-		{
-			stack_size = 0;
-		}
-	}
-
-	//
-	// stack copy did fail
-	//
-	if (stack_size < 0x40)
-	{
-		return 0;
-	}
-
-	//
-	// sub rsp, 0x28
-	//
-	// call function [push address, jmp] -> _ReturnAddress to main function is potentially at RSP - 0x30
-	//
-	// add rsp, 0x28
-	//
-
-	ctx->Rip = *(QWORD*)(&stack_buffer[0] + 0x30);
-	ctx->Rsp = *(QWORD*)(&stack_buffer[0] + 0x38);
-
-
-	//
-	// check if it's kernel address + stack
-	//
-	if (MmGetPhysicalAddress((PVOID)ctx->Rip).QuadPart == 0 || MmGetPhysicalAddress((PVOID)ctx->Rsp).QuadPart == 0)
-	{
-		return 0;
-	}
-
-	ppte pte_rip = (ppte)MiGetPteAddress(ctx->Rip);
-	ppte pte_rsp = (ppte)MiGetPteAddress(ctx->Rsp);
-	if (pte_rip == 0 || pte_rsp == 0)
-	{
-		return 0;
-	}
-
-	//
-	// page is not accessable
-	//
-	if (pte_rip->present == 0 || pte_rsp->present == 0)
-	{
-		return 0;
-	}
-
-	if (pte_rip->accessed == 0)
-	{
-		return 0;
-	}
-
-	return (pte_rip->nx == 0);
-}
-*/
-
 
 BOOLEAN bDataCompare(const BYTE* pData, const BYTE* bMask, const char* szMask)
 {
@@ -1359,3 +1118,38 @@ QWORD GetMilliSeconds()
 #endif
 }
 
+THREAD_INFO_TABLE *get_stacklist_item(QWORD thread)
+{
+	for (int i = 0; i < g_thread_stack_list_count; i++)
+	{
+		if (thread == g_thread_stack_list[i].thread)
+		{
+			return &g_thread_stack_list[i];
+		}
+	}
+	return 0;
+}
+
+void push_back_stacklist(QWORD thread, QWORD address)
+{
+	BOOL found = 0;
+	for (int i = 0; i < g_thread_stack_list_count; i++)
+	{
+		if (g_thread_stack_list[i].thread == thread)
+		{
+			g_thread_stack_list[i].address = address;
+			g_thread_stack_list[i].time = GetMilliSeconds();
+			g_thread_stack_list[i].count++;
+			found = 1;
+		}
+	}
+
+	if (found == 0 && g_thread_stack_list_count != MAX_THREAD_COUNT)
+	{
+		g_thread_stack_list[g_thread_stack_list_count].thread = thread;
+		g_thread_stack_list[g_thread_stack_list_count].address = address;
+		g_thread_stack_list[g_thread_stack_list_count].time = GetMilliSeconds();
+		g_thread_stack_list[g_thread_stack_list_count].count++;
+		g_thread_stack_list_count++;
+	}
+}
