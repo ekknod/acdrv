@@ -426,7 +426,14 @@ NTSTATUS DriverEntry(
 		table = *(QWORD*)table;
 		HalEfiEnabled = 1;
 		for (int i = 0; i < HAL_EFI_COUNT; i++) {
-			HalEfiFunctions[i] = *(QWORD*)(table + (i * 8));
+			MM_COPY_ADDRESS address;
+			address.VirtualAddress = (PVOID)(table + (i * 8));
+			SIZE_T read;
+			if (!NT_SUCCESS(MmCopyMemory(&HalEfiFunctions[i], address, 8, MM_COPY_MEMORY_VIRTUAL, &read)))
+			{
+				HalEfiEnabled = 0;
+				break;
+			}
 		}
 	}
 
@@ -898,67 +905,67 @@ BOOL CopyStackThread(QWORD thread_address, CONTEXT* ctx)
 
 		if (address < (QWORD)0xfffff00000000000)
 		{
-			if (PsGetThreadId((PETHREAD)thread_address) <= (HANDLE)KeNumberProcessors)
+			if (PsGetThreadProcessId((PETHREAD)thread_address) == 0)
 				continue;
 		}
 
-		if (MmGetPhysicalAddress((PVOID)address).QuadPart != 0)
-		{
-
-			ppte pte = (ppte)MiGetPteAddress(address);
-			if (pte == 0)
+		if (address >= (QWORD)gDriverObject->DriverStart && address < (QWORD)((QWORD)gDriverObject->DriverStart
+			+ gDriverObject->DriverSize
+			))
+			continue;
+		__try {
+			if (MmGetPhysicalAddress((PVOID)address).QuadPart != 0)
 			{
-				continue;
-			}
 
-			//
-			// PTE doesn't exists
-			//
-			if (pte->present == 0)
-			{
-				continue;
-			}
+				ppte pte = (ppte)MiGetPteAddress(address);
+				if (pte == 0)
+				{
+					continue;
+				}
 
-			//
-			// page is not executable
-			//
-			if (pte->nx == 1)
-			{
-				continue;
-			}
+				//
+				// PTE is invalid
+				//
+				if (pte->present == 0)
+				{
+					continue;
+				}
 
-			//
-			// Whenever the processor accesses a page, it automatically sets the A (Accessed) bit in the corresponding PTE = 1
-			//
-			if (pte->accessed == 0)
-			{
-				continue;
-			}
+				//
+				// page is not executable
+				//
+				if (pte->nx == 1)
+				{
+					continue;
+				}
 
+				//
+				// Whenever the processor accesses a page, it automatically sets the A (Accessed) bit in the corresponding PTE = 1
+				//
+				if (pte->accessed == 0)
+				{
+					continue;
+				}
+
+				//
+				// hmmhmm
+				//
+				if (pte->user_supervisor == 1)
+				{
+					// push_back(redflag_list, address)
+					continue;
+				}
+
+				if (!IsInValidRange(address))
+				{
+					ctx->Rip = address;
+				}
+				previous_address = address;
+			}
+		} __except(1) {
 			//
-			// hmmhmm
+			// page fault exception
 			//
-			if (pte->user_supervisor == 1)
-			{
-				// push_back(redflag_list, address)
-				continue;
-			}
-
-			if (pte->PageWriteThrough == 1)
-			{
-				continue;
-			}
-
-			if (pte->PageAccessType == 1)
-			{
-				continue;
-			}
-
-			if (!IsInValidRange(address))
-			{
-				ctx->Rip = address;
-			}
-			previous_address = address;
 		}
 	}
 
