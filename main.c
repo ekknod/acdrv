@@ -866,6 +866,15 @@ typedef union _pte
 #pragma warning (disable: 4996)
 
 
+BOOL IsAddressValidQ(QWORD address)
+{
+	if ( (unsigned __int64)address < 0xFFFFF68000000000ui64 || (unsigned __int64)address > 0xFFFFF6FFFFFFFFFFui64 )
+	{
+		return 1;
+	}
+	return 0;
+}
+
 BOOL CopyStackThread(QWORD thread_address, CONTEXT* ctx)
 {
 	// portable, could be used standalone as well
@@ -878,7 +887,7 @@ BOOL CopyStackThread(QWORD thread_address, CONTEXT* ctx)
 	QWORD kernel_stack = *(QWORD*)(thread_address + 0x58);
 	QWORD stack_size = stack_base - kernel_stack;
 
-	if (stack_size < 200)
+	if (stack_size < 0x70)
 	{
 		return 0;
 	}
@@ -893,7 +902,8 @@ BOOL CopyStackThread(QWORD thread_address, CONTEXT* ctx)
 	}
 
 
-	UCHAR stack_buffer[200];
+	UCHAR stack_buffer[0x1000];
+	memset(stack_buffer, 0, 0x1000);
 	if (kernel_stack > stack_limit && kernel_stack < stack_base)
 	{
 		if (stack_size > sizeof(stack_buffer))
@@ -914,7 +924,7 @@ BOOL CopyStackThread(QWORD thread_address, CONTEXT* ctx)
 	//
 	// stack copy did fail
 	//
-	if (stack_size < 200)
+	if (stack_size < 0x70)
 	{
 		return 0;
 	}
@@ -925,10 +935,11 @@ BOOL CopyStackThread(QWORD thread_address, CONTEXT* ctx)
 	for (int i = 0; i < sizeof(stack_buffer) / 8; i++)
 	{
 		QWORD address = ((QWORD*)(&stack_buffer[0]))[i];
-		if (address == 0)
-		{
+
+
+		if (!IsAddressValidQ(address))
 			continue;
-		}
+
 
 		if (address < (QWORD)0xfffff00000000000)
 		{
@@ -941,54 +952,46 @@ BOOL CopyStackThread(QWORD thread_address, CONTEXT* ctx)
 			))
 			continue;
 		__try {
-			if (MmGetPhysicalAddress((PVOID)address).QuadPart != 0)
+		if (MmGetPhysicalAddress((PVOID)address).QuadPart != 0)
+		{
+
+			ppte pte = (ppte)MiGetPteAddress(address);
+			if (pte == 0)
 			{
-
-				ppte pte = (ppte)MiGetPteAddress(address);
-				if (pte == 0)
-				{
-					continue;
-				}
-
-				//
-				// PTE is invalid
-				//
-				if (pte->present == 0)
-				{
-					continue;
-				}
-
-				//
-				// page is not executable
-				//
-				if (pte->nx == 1)
-				{
-					continue;
-				}
-
-				//
-				// Whenever the processor accesses a page, it automatically sets the A (Accessed) bit in the corresponding PTE = 1
-				//
-				if (pte->accessed == 0)
-				{
-					continue;
-				}
-
-				//
-				// hmmhmm
-				//
-				if (pte->user_supervisor == 1)
-				{
-					// push_back(redflag_list, address)
-					continue;
-				}
-
-				if (!IsInValidRange(address))
-				{
-					ctx->Rip = address;
-				}
-				previous_address = address;
+				continue;
 			}
+
+			//
+			// PTE is invalid
+			//
+			if (pte->present == 0)
+			{
+				continue;
+			}
+
+			//
+			// page is not executable
+			//
+			if (pte->nx == 1)
+			{
+				continue;
+			}
+
+			//
+			// Whenever the processor accesses a page, it automatically sets the A (Accessed) bit in the corresponding PTE = 1
+			//
+			if (pte->accessed == 0)
+			{
+				continue;
+			}
+
+			if (!IsInValidRange(address))
+			{
+				ctx->Rip = address;
+			}
+
+			previous_address = address;
+		}
 		} __except(1) {
 			//
 			// page fault exception
