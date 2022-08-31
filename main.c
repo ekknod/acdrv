@@ -824,6 +824,13 @@ BOOL GetThreadStack(QWORD thread, CONTEXT* thread_context)
 		return 0;
 
 	status = CopyStackThread(thread, thread_context);
+
+	/*
+	
+	there is rare cases, where thread has pending APC / or with bad timing goes to guarded region
+	it would be better to do manually do APC, doing it with PsGetContextThread is not good,
+	because it will then wait forever APC request to complete
+
 	if (status == 0)
 	{
 		MISC_FLAGS* flags = (MISC_FLAGS*)(thread + 0x74);
@@ -834,6 +841,7 @@ BOOL GetThreadStack(QWORD thread, CONTEXT* thread_context)
 		}
 		
 	}
+	*/
 
 	return status;
 }
