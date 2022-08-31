@@ -290,11 +290,11 @@ void AntiCheatInvalidRangeDetection(QWORD thread, CONTEXT ctx)
 			{
 				QWORD host_process = *(QWORD*)(thread + 0x220);
 				DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
-					"[%s] Thread is executing outside of valid module [%ld, %llx] RIP[%llx]\n",
+					"[%s][%ld] Thread outside of valid module RIP[%llx] RSP[%llx]\n",
 					PsGetProcessImageFileName(host_process),
 					(DWORD)(QWORD)PsGetThreadId((PETHREAD)thread),
-					thread,
-					ctx.Rip
+					ctx.Rip,
+					ctx.Rsp
 				);
 			}
 		}
@@ -940,6 +940,8 @@ BOOL CopyStackThread(QWORD thread_address, CONTEXT* ctx)
 
 	QWORD previous_address=0;
 	ctx->Rip = 0;
+
+	int stack_index = 0;
 	for (int i = 0; i < sizeof(stack_buffer) / 8; i++)
 	{
 		QWORD address = ((QWORD*)(&stack_buffer[0]))[i];
@@ -996,9 +998,11 @@ BOOL CopyStackThread(QWORD thread_address, CONTEXT* ctx)
 			if (!IsInValidRange(address))
 			{
 				ctx->Rip = address;
+				ctx->Rsp = (QWORD)kernel_stack + (i * sizeof(QWORD));
 			}
 
 			previous_address = address;
+			stack_index = i;
 		}
 		} __except(1) {
 			//
@@ -1015,6 +1019,7 @@ BOOL CopyStackThread(QWORD thread_address, CONTEXT* ctx)
 	if (ctx->Rip == 0)
 	{
 		ctx->Rip = previous_address;
+		ctx->Rsp = (QWORD)kernel_stack + (stack_index * sizeof(QWORD));
 	}
 
 	return 1;
