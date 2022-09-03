@@ -1,26 +1,25 @@
 /*
- * ekknod@2021-2022
+ * ekknod@2022
  *
- * these methods were part of my hobby anti-cheat, and decided to make it public.
- * it's targetted against common kernel drivers.
+ * Some of these methods were part of my hobby anti-cheat.
+ * I used that tool for fixing potential detection vectors.
+ * Hopefully you guys find this tool useful (both AC and cheat developers)
+ * 
+ * It catches a lot of Legit action as well, its nowhere perfect.
+ * Also code is written for single file only, it's because it was originally just checking hidden threads.
  *
  * current methods:
- * - Catch hidden / Unlinked system threads
- * - Catch execution outside of valid module range
- * - Catch KeStackAttachMemory/MmCopyVirtualMemory/ReadProcessMemory
- * - Catch manual MouseClassServiceCallback call
+ * - Catch hidden / Unlinked system threads                          [Detection]
+ * - Catch manual MouseClassServiceCallback call                     [Detection]
+ * - Catch execution outside of valid module range                   [Suspicious action]
+ * - Check KeStackAttachMemory/MmCopyVirtualMemory/ReadProcessMemory [Suspicious action]
+ * 
  */
 
 #include <intrin.h>
 #include <ntifs.h>
 
-
-
-
 #define TARGET_PROCESS "csgo.exe"
-
-
-
 
 #ifndef CUSTOMTYPES
 #define CUSTOMTYPES
@@ -76,8 +75,6 @@ PDRIVER_OBJECT gDriverObject;
 PVOID   gThreadObject;
 HANDLE  gThreadHandle;
 BOOLEAN gExitCalled;
-DWORD   gCtxOffset;
-
 
 
 //
@@ -139,6 +136,7 @@ QWORD MouseClassServiceCallback(
 QWORD GetMilliSeconds();
 QWORD GetProcAddressQ(QWORD base, PCSTR name);
 QWORD FindPattern(QWORD module, BYTE* bMask, CHAR* szMask, QWORD len);
+QWORD FindPatternEx(UINT64 dwAddress, QWORD dwLen, BYTE* bMask, char* szMask);
 PVOID ResolveRelativeAddress(
 	_In_ PVOID Instruction,
 	_In_ ULONG OffsetOffset,
@@ -156,13 +154,11 @@ typedef struct _KPRCB* PKPRCB;
 __declspec(dllimport) PKPRCB KeQueryPrcbAddress(__in ULONG Number);
 __int64(__fastcall* MiGetPteAddress)(unsigned __int64 a1);
 
-
 //
 // complete functions
 //
 BOOL IsInValidRange(QWORD address);
 BOOL GetThreadStack(QWORD thread, CONTEXT* thread_context);
-
 
 
 //
@@ -182,9 +178,9 @@ QWORD MouseClassServiceCallbackHook(
 		if (address < (QWORD)vmusbmouse.base || address >(QWORD)((QWORD)vmusbmouse.base + vmusbmouse.size))
 		{
 			QWORD thread = (QWORD)PsGetCurrentThread();
-
-			DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
-				"Mouse manipulation was detected (%ld, %llx)\n",
+			QWORD host_process = *(QWORD*)(thread + 0x220);
+			DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "[%s][%ld] Thread is manipulating mouse [%llx]\n",
+				PsGetProcessImageFileName(host_process),
 				(DWORD)(QWORD)PsGetThreadId((PETHREAD)thread),
 				thread
 			);
@@ -228,15 +224,11 @@ BOOL AntiCheatUnlinkDetection(QWORD thread)
 
 	if (!IsThreadFoundEPROCESS(host_process, thread))
 	{
-		DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "Hidden thread found [%s %d], %llx, %d]\n",
+		DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "[%s][%ld] Thread is unlinked [%llx]\n",
 			PsGetProcessImageFileName(host_process),
-
-			PsGetProcessId((PEPROCESS)host_process),
-
-			thread,
-			(DWORD)(QWORD)PsGetThreadId((PETHREAD)thread)
+			(DWORD)(QWORD)PsGetThreadId((PETHREAD)thread),
+			thread
 		);
-
 		hidden = 1;
 	}
 
@@ -257,18 +249,14 @@ BOOL AntiCheatAttachProcessDetection(QWORD target_game, QWORD thread)
 	if (target_game == host_process)
 		return 0;
 
-
 	if (*(QWORD*)(thread + 0x98 + 0x20) == target_game) {
-		DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "[%s] Thread (%llx, %ld) is attached to %s\n",
+		DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "[%s][%ld] Thread is attached to %s\n",
 			PsGetProcessImageFileName(host_process),
-			thread,
 			(DWORD)(QWORD)PsGetThreadId((PETHREAD)thread),
 			PsGetProcessImageFileName(*(QWORD*)(thread + 0x98 + 0x20))
 		);
-
 		attach = 1;
 	}
-
 	return attach;
 }
 
@@ -278,6 +266,15 @@ void AntiCheatInvalidRangeDetection(QWORD thread, CONTEXT ctx)
 {
 	if (thread == 0)
 		return;
+
+	if (!PsIsSystemThread((PETHREAD)thread))
+	{
+		QWORD thread_process = *(QWORD*)(thread + 0x220);
+		if (thread_process != (QWORD)PsGetCurrentProcess())
+		{
+			return;
+		}
+	}
 
 	if (!IsInValidRange(ctx.Rip)) {
 		THREAD_INFO_TABLE *table = get_stacklist_item(thread);
@@ -371,37 +368,13 @@ NTSTATUS system_thread(void)
 	DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "[+] Anti-Cheat.sys is launched\n");
 
 	QWORD target_game = 0;
-
-
-
-
-
-
-	// QWORD prev_ms = GetMilliSeconds();
-
 	while (gExitCalled == 0) {
 
 		NtSleep(1);
-
 		if (target_game == 0 || PsGetProcessExitProcessCalled((PEPROCESS)target_game)) {
 			target_game = GetProcessByName(TARGET_PROCESS);
-
-			if (target_game == 0)
-				goto skip_address;
 		}
-	skip_address:
 		AntiCheat(target_game);
-		/*
-		QWORD ms = GetMilliSeconds();
-		if (ms - prev_ms > 30000)
-		{
-			prev_ms = ms;
-			for (int i = 0; i < suspect_list_count; i++)
-			{
-				PrintSuspects(suspects);
-			}
-		}
-		*/
 	}
 
 	DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "[+] Anti-Cheat.sys thread is closed\n");
@@ -409,11 +382,13 @@ NTSTATUS system_thread(void)
 	return 0l;
 }
 
+
 NTSTATUS DriverEntry(
 	_In_ PDRIVER_OBJECT  DriverObject,
 	_In_ PUNICODE_STRING RegistryPath
 )
 {
+	
 	(DriverObject);
 	(RegistryPath);
 
@@ -422,16 +397,6 @@ NTSTATUS DriverEntry(
 
 	vmusbmouse.base = GetModuleHandle(L"vmusbmouse.sys", &vmusbmouse.size);
 	QWORD ntoskrnl = GetModuleHandle(L"ntoskrnl.exe", 0);
-
-
-	QWORD KeBugCheckExPtr = (QWORD)KeBugCheckEx;
-	KeBugCheckExPtr = KeBugCheckExPtr + 0x23;
-	KeBugCheckExPtr = KeBugCheckExPtr + 0x03;
-	gCtxOffset      = *(DWORD*)KeBugCheckExPtr;
-
-
-
-
 
 	QWORD MmUnlockPreChargedPagedPool = GetProcAddressQ((QWORD)ntoskrnl, "MmUnlockPreChargedPagedPool");
 	if (MmUnlockPreChargedPagedPool == 0)
@@ -576,11 +541,7 @@ QWORD GetModuleHandle(PWCH module_name, QWORD* SizeOfImage)
 	PLDR_DATA_TABLE_ENTRY ldr = (PLDR_DATA_TABLE_ENTRY)gDriverObject->DriverSection;
 	for (PLIST_ENTRY pListEntry = ldr->InLoadOrderLinks.Flink; pListEntry != &ldr->InLoadOrderLinks; pListEntry = pListEntry->Flink)
 	{
-
 		PLDR_DATA_TABLE_ENTRY pEntry = CONTAINING_RECORD(pListEntry, LDR_DATA_TABLE_ENTRY, InLoadOrderLinks);
-
-		
-
 		if (pEntry->BaseImageName.Buffer && wcscmp(pEntry->BaseImageName.Buffer, module_name) == 0) {
 			if (SizeOfImage) {
 				*SizeOfImage = 0;
@@ -590,7 +551,6 @@ QWORD GetModuleHandle(PWCH module_name, QWORD* SizeOfImage)
 		}
 
 	}
-
 	return 0;
 }
 
@@ -771,50 +731,6 @@ void mouse_unhook(void)
 	}
 }
 
-#pragma warning(disable : 4201)
-#pragma warning(disable : 4214)
-
-typedef struct MISC_FLAGS {
-	union
-	{
-		struct
-		{
-			ULONG AutoBoostActive : 1;                                        //0x74
-			ULONG ReadyTransition : 1;                                        //0x74
-			ULONG WaitNext : 1;                                               //0x74
-			ULONG SystemAffinityActive : 1;                                   //0x74
-			ULONG Alertable : 1;                                              //0x74
-			ULONG UserStackWalkActive : 1;                                    //0x74
-			ULONG ApcInterruptRequest : 1;                                    //0x74
-			ULONG QuantumEndMigrate : 1;                                      //0x74
-			ULONG UmsDirectedSwitchEnable : 1;                                //0x74
-			ULONG TimerActive : 1;                                            //0x74
-			ULONG SystemThread : 1;                                           //0x74
-			ULONG ProcessDetachActive : 1;                                    //0x74
-			ULONG CalloutActive : 1;                                          //0x74
-			ULONG ScbReadyQueue : 1;                                          //0x74
-			ULONG ApcQueueable : 1;                                           //0x74
-			ULONG ReservedStackInUse : 1;                                     //0x74
-			ULONG UmsPerformingSyscall : 1;                                   //0x74
-			ULONG TimerSuspended : 1;                                         //0x74
-			ULONG SuspendedWaitMode : 1;                                      //0x74
-			ULONG SuspendSchedulerApcWait : 1;                                //0x74
-			ULONG CetUserShadowStack : 1;                                     //0x74
-			ULONG BypassProcessFreeze : 1;                                    //0x74
-			ULONG Reserved : 10;                                              //0x74
-		};
-		LONG MiscFlags;                                                     //0x74
-	};
-} MISC_FLAGS;
-
-__declspec(dllimport)
-NTSTATUS
-PsGetContextThread(
-	__in PETHREAD Thread,
-	__inout PCONTEXT ThreadContext,
-	__in KPROCESSOR_MODE Mode
-);
-
 BOOL CopyStackThread(QWORD thread_address, CONTEXT* ctx);
 BOOL GetThreadStack(QWORD thread, CONTEXT* thread_context)
 {
@@ -872,7 +788,6 @@ typedef union _pte
 
 
 #pragma warning (disable: 4996)
-
 
 BOOL IsAddressValidQ(QWORD address)
 {
@@ -1345,4 +1260,3 @@ void push_back_stacklist(QWORD thread, QWORD address)
 		g_thread_stack_list_count++;
 	}
 }
-
