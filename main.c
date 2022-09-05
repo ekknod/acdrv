@@ -21,6 +21,17 @@
 
 #define TARGET_PROCESS "csgo.exe"
 
+//
+// this project did not actually need NMI interrupts since we can do almost the same at KPRCB,
+// but i decided to add since some people might need it for their own purposes.
+// 
+// changing NMI_INTERRUPT define to something else for example 0 will disable NMI interrupts
+// NMI_INTERRUPT_INTERVAL 100ms for test bench, real anti-cheat would probably have interrupts less often.
+//
+
+#define NMI_INTERRUPT_INTERVAL 100
+#define NMI_INTERRUPT 1
+
 #ifndef CUSTOMTYPES
 #define CUSTOMTYPES
 typedef ULONG_PTR QWORD;
@@ -74,7 +85,14 @@ IMAGE_INFO_TABLE vmusbmouse;
 PDRIVER_OBJECT gDriverObject;
 PVOID   gThreadObject;
 HANDLE  gThreadHandle;
+QWORD   gThreadProcess;
 BOOLEAN gExitCalled;
+
+#if NMI_INTERRUPT == 1
+DWORD   gCtxOffset;
+PVOID   NmiCallbackHandle;
+QWORD   gTotalNmiCount;
+#endif
 
 
 //
@@ -262,7 +280,7 @@ BOOL AntiCheatAttachProcessDetection(QWORD target_game, QWORD thread)
 
 #define TRIGGER_DETECTION_MS  100
 #define TRIGGER_COUNTER       10000
-void AntiCheatInvalidRangeDetection(QWORD thread, CONTEXT ctx)
+void AntiCheatInvalidRangeDetection(QWORD thread, CONTEXT ctx, BOOLEAN nmi)
 {
 	if (thread == 0)
 		return;
@@ -270,7 +288,7 @@ void AntiCheatInvalidRangeDetection(QWORD thread, CONTEXT ctx)
 	if (!PsIsSystemThread((PETHREAD)thread))
 	{
 		QWORD thread_process = *(QWORD*)(thread + 0x220);
-		if (thread_process != (QWORD)PsGetCurrentProcess())
+		if (thread_process != (QWORD)gThreadProcess)
 		{
 			return;
 		}
@@ -282,8 +300,9 @@ void AntiCheatInvalidRangeDetection(QWORD thread, CONTEXT ctx)
 		{
 			QWORD ms = GetMilliSeconds();
 			QWORD previous_ms = table->time;
+			BOOL  cnt_triggered = (ms - previous_ms < TRIGGER_DETECTION_MS) + (table->count > TRIGGER_COUNTER);
 
-			if ((ms - previous_ms < TRIGGER_DETECTION_MS) || table->count > TRIGGER_COUNTER)
+			if (cnt_triggered || nmi)
 			{
 				QWORD host_process = *(QWORD*)(thread + 0x220);
 				DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
@@ -298,6 +317,25 @@ void AntiCheatInvalidRangeDetection(QWORD thread, CONTEXT ctx)
 		push_back_stacklist(thread, ctx.Rip);
 	}
 }
+
+#if NMI_INTERRUPT == 1
+
+BOOLEAN
+NmiCallback(
+    _In_opt_ PVOID Context,
+    _In_ BOOLEAN Handled
+    )
+{
+	UNREFERENCED_PARAMETER(Context);
+	UNREFERENCED_PARAMETER(Handled);
+	struct  _CONTEXT *current_context = *(struct  _CONTEXT **)(__readgsqword(0x20) + gCtxOffset);
+	AntiCheatInvalidRangeDetection(__readgsqword(0x188), *current_context, 1);
+	AntiCheatUnlinkDetection(__readgsqword(0x188));
+	gTotalNmiCount = gTotalNmiCount + 1;
+	return 1;
+}
+
+#endif
 
 void AntiCheat(QWORD target_game)
 {
@@ -319,7 +357,7 @@ void AntiCheat(QWORD target_game)
 			CONTEXT ctx;
 			ctx.ContextFlags = CONTEXT_ALL;
 			if (GetThreadStack(current_thread, &ctx)) {
-				AntiCheatInvalidRangeDetection(current_thread, ctx);
+				AntiCheatInvalidRangeDetection(current_thread, ctx, 0);
 			}
 		}
 
@@ -356,32 +394,94 @@ DriverUnload(
 		ZwClose(gThreadHandle);
 	}
 
-
-	// Lets wait second, everything should be unloaded now.
 	NtSleep(1000);
+#if NMI_INTERRUPT == 1
+	if (NmiCallbackHandle)
+		KeDeregisterNmiCallback(NmiCallbackHandle);
+#endif
 
 	DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "[+] Anti-Cheat.sys is closed\n");
+}
+
+__declspec(dllimport) unsigned __int16 __fastcall KeCopyAffinityEx(__int64 a1, __int64 a2);
+__declspec(dllimport) void __fastcall HalSendNMI(__int64 a1);
+__declspec(dllimport) __int64 __fastcall KeRemoveProcessorAffinityEx(QWORD, QWORD);
+
+void nmi_interurpt(void)
+{
+	char a0[0x100];
+
+	QWORD KeActiveProcessors = (QWORD)KeQueryGroupAffinity;
+	KeActiveProcessors = (QWORD)ResolveRelativeAddress((PVOID)KeActiveProcessors, 3, 7);
+
+	QWORD prcb = __readgsqword(0x20);
+	KeCopyAffinityEx((QWORD)a0, KeActiveProcessors);
+	KeRemoveProcessorAffinityEx((QWORD)a0, *(DWORD*)(prcb + 0x24));
+	HalSendNMI( (QWORD)a0 );
 }
 
 NTSTATUS system_thread(void)
 {
 	DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "[+] Anti-Cheat.sys is launched\n");
 
+	gThreadProcess    = (QWORD)PsGetCurrentProcess();
+
+#if NMI_INTERRUPT == 1
+	QWORD nmi_interrupts = 0;
+	QWORD previous_ms = GetMilliSeconds();
+#endif
 	QWORD target_game = 0;
+
 	while (gExitCalled == 0) {
 
 		NtSleep(1);
 		if (target_game == 0 || PsGetProcessExitProcessCalled((PEPROCESS)target_game)) {
 			target_game = GetProcessByName(TARGET_PROCESS);
 		}
+
 		AntiCheat(target_game);
+		//
+		// This nmi interrupt is going to temporary stop all cores,
+		// expect the one you currently executing.
+		//
+
+#if NMI_INTERRUPT == 1
+		if (GetMilliSeconds() - previous_ms > NMI_INTERRUPT_INTERVAL)
+		{
+			//
+			// we should probably check if there is active NMI interrupt
+			// but then again, NMI interrupt handler should be verifying it for us.
+			//
+			__try {
+				nmi_interurpt();
+			} __except (1) {
+			}
+
+			nmi_interrupts++;
+			previous_ms = GetMilliSeconds();
+			if (nmi_interrupts > 5)
+			{
+				DWORD num = KeNumberProcessors - 1;
+				num = num * 4;
+
+				if (gTotalNmiCount < num)
+				{
+					DbgPrintEx(76, 0,
+						"[+] Anti-Cheat.sys: NMI blocking detected!!!\n"
+					);
+				}
+
+				nmi_interrupts = 0;
+				gTotalNmiCount = 0;
+			}
+		}
+#endif
 	}
 
 	DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "[+] Anti-Cheat.sys thread is closed\n");
 
 	return 0l;
 }
-
 
 NTSTATUS DriverEntry(
 	_In_ PDRIVER_OBJECT  DriverObject,
@@ -397,6 +497,15 @@ NTSTATUS DriverEntry(
 
 	vmusbmouse.base = GetModuleHandle(L"vmusbmouse.sys", &vmusbmouse.size);
 	QWORD ntoskrnl = GetModuleHandle(L"ntoskrnl.exe", 0);
+
+
+#if NMI_INTERRUPT == 1
+	QWORD KeBugCheckExPtr = (QWORD)KeBugCheckEx;
+	KeBugCheckExPtr = KeBugCheckExPtr + 0x23;
+	KeBugCheckExPtr = KeBugCheckExPtr + 0x03;
+	gCtxOffset      = *(DWORD*)KeBugCheckExPtr;
+#endif
+
 
 	QWORD MmUnlockPreChargedPagedPool = GetProcAddressQ((QWORD)ntoskrnl, "MmUnlockPreChargedPagedPool");
 	if (MmUnlockPreChargedPagedPool == 0)
@@ -464,6 +573,10 @@ NTSTATUS DriverEntry(
 
 	mouse_hook();
 
+#if NMI_INTERRUPT == 1
+	NmiCallbackHandle = KeRegisterNmiCallback(&NmiCallback, 0);
+#endif
+
 	CLIENT_ID thread_id;
 	PsCreateSystemThread(&gThreadHandle, STANDARD_RIGHTS_ALL, NULL, NULL, &thread_id, (PKSTART_ROUTINE)system_thread, (PVOID)0);
 	ObReferenceObjectByHandle(
@@ -512,8 +625,12 @@ BOOL IsInValidRange(QWORD address)
 			if (pEntry->ImageBase == 0)
 				continue;
 
+
+
 			if (address >= (QWORD)pEntry->ImageBase && address <= (QWORD)((QWORD)pEntry->ImageBase + pEntry->SizeOfImage + 0x1000))
+			{			
 				return 1;
+			}
 
 		}
 	}
@@ -527,7 +644,9 @@ BOOL IsInValidRange(QWORD address)
 				continue;
 
 			if (address >= (QWORD)pEntry->ImageBase && address <= (QWORD)((QWORD)pEntry->ImageBase + pEntry->SizeOfImage + 0x1000))
+			{
 				return 1;
+			}
 
 		}
 	}
