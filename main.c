@@ -197,7 +197,7 @@ QWORD MouseClassServiceCallbackHook(
 	{
 		QWORD thread = (QWORD)PsGetCurrentThread();
 		QWORD host_process = *(QWORD*)(thread + 0x220);
-		DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "[%s][%ld] Thread is manipulating mouse [%llx]\n",
+		DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "[%s][%ld] MouseClassServiceCallbackTrick detected [%llx]\n",
 			PsGetProcessImageFileName(host_process),
 			(DWORD)(QWORD)PsGetThreadId((PETHREAD)thread),
 			thread
