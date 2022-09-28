@@ -94,6 +94,10 @@ PVOID   NmiCallbackHandle;
 QWORD   gTotalNmiCount;
 #endif
 
+//
+// IdleThread object
+//
+QWORD KiIdleThread = 0;
 
 //
 // MouseClassServiceCallbackHook
@@ -189,6 +193,17 @@ QWORD MouseClassServiceCallbackHook(
 	PULONG InputDataConsumed
 )
 {
+	if (KiIdleThread != 0 && KiIdleThread != (QWORD)PsGetCurrentThread())
+	{
+		QWORD thread = (QWORD)PsGetCurrentThread();
+		QWORD host_process = *(QWORD*)(thread + 0x220);
+		DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "[%s][%ld] Thread is manipulating mouse [%llx]\n",
+			PsGetProcessImageFileName(host_process),
+			(DWORD)(QWORD)PsGetThreadId((PETHREAD)thread),
+			thread
+		);
+	}
+
 	QWORD address = (QWORD)_ReturnAddress();
 	if (address < (QWORD)gMouseObject.hid || address >(QWORD)((QWORD)gMouseObject.hid + gMouseObject.hid_length))
 	{
@@ -350,8 +365,18 @@ void AntiCheat(QWORD target_game)
 
 		current_thread = *(QWORD*)((QWORD)prcb + 0x8);
 		next_thread = *(QWORD*)((QWORD)prcb + 0x10);
+
 		if (current_thread != 0 && current_thread != (QWORD)PsGetCurrentThread())
 		{
+			if (KiIdleThread == 0)
+			{
+				if (PsGetThreadProcessId((PETHREAD)current_thread) == 0 && PsGetThreadId((PETHREAD)current_thread) == 0)
+				{
+					KiIdleThread = current_thread;
+				}
+			}
+
+
 			AntiCheatAttachProcessDetection(target_game, current_thread);
 
 			CONTEXT ctx;
