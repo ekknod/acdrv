@@ -2,7 +2,6 @@ EXTERNDEF _KeAcquireSpinLockAtDpcLevel:PROC
 EXTERNDEF _KeReleaseSpinLockFromDpcLevel:PROC
 EXTERNDEF _IofCompleteRequest:PROC
 EXTERNDEF _IoReleaseRemoveLockEx:PROC
-EXTERNDEF MouseClassServiceCallbackHook:PROC
 EXTERNDEF memmove:PROC
 
 .data
@@ -125,7 +124,6 @@ MouseClassDequeueRead endp
 
 
 MouseClassServiceCallback proc
-	jmp    MouseClassServiceCallbackHook
 	mov    rax,rsp
 	mov    QWORD PTR [rax+8h],rbx
 	mov    QWORD PTR [rax+10h],rsi
@@ -496,4 +494,3 @@ J4c7:
 MouseClassServiceCallback endp
 
 end
-
