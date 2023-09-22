@@ -1,2 +1,2 @@
 # acdrv
-currently it can catch general mouse input manipulation  
+currently it can catch general mouse input manipulation [no HVCI]  
