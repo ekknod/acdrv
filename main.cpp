@@ -163,11 +163,21 @@ NTSTATUS hooks::input::MouseClassReadHook(PDEVICE_OBJECT device, PIRP irp)
 	//
 	if (b_input_sent == 0 && vmware == 0)
 	{
-		QWORD thread = (QWORD)PsGetCurrentThread();
-		DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "[%ld] Thread is manipulating mouse [%llx]\n",
-			(DWORD)(QWORD)PsGetThreadId((PETHREAD)thread),
-			thread
-		);
+		__int64 v4 = *(QWORD *)((QWORD)irp + 184);
+		QWORD   en = *(QWORD*)(*(QWORD *)(v4 + 48) + 32i64);
+		QWORD   driver_init = (QWORD)mouclass->DriverInit;
+
+		//
+		// this code is approax same as original which is found from MouseClassRead
+		//
+		if (en >= driver_init && (en <= (driver_init + 0x1000)))
+		{
+			QWORD thread = (QWORD)PsGetCurrentThread();
+			DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "[%ld] Thread is manipulating mouse [%llx]\n",
+				(DWORD)(QWORD)PsGetThreadId((PETHREAD)thread),
+				thread
+			);
+		}
 	}
 	NTSTATUS status = hooks::input::oMouseClassRead(device,irp);
 	b_input_sent = 0;
