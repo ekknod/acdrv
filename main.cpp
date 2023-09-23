@@ -145,7 +145,7 @@ QWORD hooks::input::MouseClassServiceCallbackHook(
 				(DWORD)(QWORD)PsGetThreadId((PETHREAD)thread),
 				thread
 			);
-
+			b_input_sent=0;
 			return MouseClassServiceCallback(DeviceObject, InputDataStart, InputDataEnd, InputDataConsumed);
 		}
 	}
