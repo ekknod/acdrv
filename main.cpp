@@ -146,7 +146,7 @@ QWORD hooks::input::MouseClassServiceCallbackHook(
 				thread
 			);
 
-			return 0;
+			return MouseClassServiceCallback(DeviceObject, InputDataStart, InputDataEnd, InputDataConsumed);
 		}
 	}
 	b_input_sent=1;
