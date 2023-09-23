@@ -154,25 +154,18 @@ QWORD hooks::input::MouseClassServiceCallbackHook(
 //
 NTSTATUS hooks::input::MouseClassReadHook(PDEVICE_OBJECT device, PIRP irp)
 {
-	//
-	// did MouseClassServiceCallback get called?
-	// only works for real systems. vmware is not supported.
-	//
-	if (b_input_sent == 0 && vmware == 0)
+	NTSTATUS status = hooks::input::oMouseClassRead(device,irp);
+	if (status == 259)
 	{
-		__int64 v4 = *(QWORD *)((QWORD)irp + 184);
-		QWORD   en = *(QWORD*)(*(QWORD *)(v4 + 48) + 32i64);
-		QWORD   driver_init = (QWORD)mouclass->DriverInit;
-
 		//
-		// this code is approax same as original which is found from MouseClassRead
+		// did MouseClassServiceCallback get called?
+		// only works for real systems. vmware is not supported.
 		//
-		if (en >= driver_init && (en <= (driver_init + 0x1000)))
+		if (b_input_sent == 0 && vmware == 0)
 		{
 			LOG("manual mouse input call detected\n");
 		}
 	}
-	NTSTATUS status = hooks::input::oMouseClassRead(device,irp);
 	b_input_sent = 0;
 	return status;
 }
