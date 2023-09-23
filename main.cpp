@@ -130,6 +130,7 @@ QWORD hooks::input::MouseClassServiceCallbackHook(
 	QWORD return_address = *(QWORD*)(rsp);
 
 	//
+	// extra data
 	//  *(UCHAR*)(__readgsqword(0x20) + 0x33BA) == 1 (DpcRoutineActive) 
 	//  *(QWORD*)(__readgsqword(0x20) + 0x3320) == Wdf01000.sys:0x6ca0 (void __fastcall imp_VfWdfRequestGetParameters) (CurrentDpcRoutine)
 	//
@@ -137,13 +138,13 @@ QWORD hooks::input::MouseClassServiceCallbackHook(
 	//
 	// call should be coming from ntoskrnl.exe IopfCompleteRequest
 	//
-	if (return_address < ntoskrnl.base || return_address > (ntoskrnl.base + ntoskrnl.size))
+	if (return_address >= ntoskrnl.base && return_address <= (ntoskrnl.base + ntoskrnl.size))
 	{
-		input_sent=0;
+		input_sent = 1;
 	}
 	else
 	{
-		input_sent=1;
+		input_sent = 0;
 	}
 	return MouseClassServiceCallback(DeviceObject, InputDataStart, InputDataEnd, InputDataConsumed);
 }
