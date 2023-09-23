@@ -1,2 +1,2 @@
-# Anti-Cheat.sys
-currently it can catch general mouse input manipulation  
+# acdrv
+currently it can catch general mouse input manipulation [no HVCI support]  
