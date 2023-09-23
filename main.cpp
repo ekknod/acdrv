@@ -8,6 +8,7 @@
 // e.g.
 // https://github.com/nbqofficial/norsefire
 // https://github.com/ekknod/MouseClassServiceCallbackTrick
+// https://github.com/ekknod/MouseClassServiceCallbackMeme
 //
 
 typedef ULONG_PTR QWORD;
@@ -39,6 +40,17 @@ extern "C"
 }
 
 MODULE_INFO get_module_info(PWCH module_name);
+void NtSleep(DWORD milliseconds)
+{
+	QWORD ms = milliseconds;
+	ms = (ms * 1000) * 10;
+	ms = ms * -1;
+#ifdef _KERNEL_MODE
+	KeDelayExecutionThread(KernelMode, 0, (PLARGE_INTEGER)&ms);
+#else
+	NtDelayExecution(0, (PLARGE_INTEGER)&ms);
+#endif
+}
 
 namespace hooks
 {
@@ -47,12 +59,17 @@ namespace hooks
 
 	namespace input
 	{
-		MODULE_INFO   vmusbmouse;
-		MODULE_INFO   mouclass;
-		MODULE_INFO   mouhid;
-		QWORD         mouclass_routine;
-		unsigned char original_bytes[14];
-		QWORD         MouseClassServiceCallbackHook(PDEVICE_OBJECT DeviceObject, PMOUSE_INPUT_DATA InputDataStart, PMOUSE_INPUT_DATA InputDataEnd, PULONG InputDataConsumed);
+		MODULE_INFO    vmusbmouse;
+		PDRIVER_OBJECT mouclass;
+		PDRIVER_OBJECT mouhid;
+		QWORD          mouclass_routine;
+		BOOLEAN        b_input_sent;
+		BOOLEAN        vmware;
+		unsigned char  original_bytes[14];
+
+		NTSTATUS       (*oMouseClassRead)(PDEVICE_OBJECT device, PIRP irp);
+		QWORD          MouseClassServiceCallbackHook(PDEVICE_OBJECT DeviceObject, PMOUSE_INPUT_DATA InputDataStart, PMOUSE_INPUT_DATA InputDataEnd, PULONG InputDataConsumed);
+		NTSTATUS       MouseClassReadHook(PDEVICE_OBJECT device, PIRP irp);
 	}
 }
 
@@ -62,6 +79,9 @@ extern "C" VOID DriverUnload(
 {
 	UNREFERENCED_PARAMETER(DriverObject);
 	hooks::uninstall();
+
+	NtSleep(200);
+	DbgPrintEx(77, 0, "[+] driver is successfully closed\n");
 }
 
 extern "C" NTSTATUS DriverEntry(
@@ -70,6 +90,8 @@ extern "C" NTSTATUS DriverEntry(
 )
 {
 	UNREFERENCED_PARAMETER(RegistryPath);
+
+	DbgPrintEx(77, 0, "[+] driver is successfully started\n");
 
 	ntoskrnl = get_module_info(L"ntoskrnl.exe");
 	if (!hooks::install())
@@ -103,7 +125,11 @@ QWORD hooks::input::MouseClassServiceCallbackHook(
 
 	QWORD return_address = *(QWORD*)(rsp);
 
-
+	//
+	//  *(UCHAR*)(__readgsqword(0x20) + 0x33BA) == 1 (DpcRoutineActive) 
+	//  *(QWORD*)(__readgsqword(0x20) + 0x3320) == Wdf01000.sys:0x6ca0 (void __fastcall imp_VfWdfRequestGetParameters) (CurrentDpcRoutine)
+	//
+	
 	//
 	// call should be coming from ntoskrnl.exe IopfCompleteRequest
 	//
@@ -120,7 +146,29 @@ QWORD hooks::input::MouseClassServiceCallbackHook(
 			return 0;
 		}
 	}
+	b_input_sent=1;
 	return MouseClassServiceCallback(DeviceObject, InputDataStart, InputDataEnd, InputDataConsumed);
+}
+
+//
+// https:://github.com/everdox/hidinput
+//
+NTSTATUS hooks::input::MouseClassReadHook(PDEVICE_OBJECT device, PIRP irp)
+{
+	//
+	// did MouseClassServiceCallback get called?
+	//
+	if (b_input_sent == 0 && vmware == 0)
+	{
+		QWORD thread = (QWORD)PsGetCurrentThread();
+		DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "[%ld] Thread is manipulating mouse [%llx]\n",
+			(DWORD)(QWORD)PsGetThreadId((PETHREAD)thread),
+			thread
+		);
+	}
+	NTSTATUS status = hooks::input::oMouseClassRead(device,irp);
+	b_input_sent = 0;
+	return status;
 }
 
 typedef struct _KLDR_DATA_TABLE_ENTRY {
@@ -177,7 +225,7 @@ ObReferenceObjectByName(
 
 extern "C" NTSYSCALLAPI POBJECT_TYPE* IoDriverObjectType;
 
-QWORD get_mouse_callback_address(MODULE_INFO *mouclass, MODULE_INFO *mouhid)
+QWORD get_mouse_callback_address(PDRIVER_OBJECT *mouclass, PDRIVER_OBJECT *mouhid)
 {
 	//
 	// https://github.com/nbqofficial/norsefire
@@ -192,12 +240,9 @@ QWORD get_mouse_callback_address(MODULE_INFO *mouclass, MODULE_INFO *mouhid)
 	if (!NT_SUCCESS(status)) {
 		return 0;
 	}
-
+	
 	if (mouclass)
-	{
-		mouclass->base = (QWORD)class_driver_object->DriverStart;
-		mouclass->size = (QWORD)class_driver_object->DriverSize;
-	}
+		*mouclass = class_driver_object;
 
 	UNICODE_STRING hid_string;
 	RtlInitUnicodeString(&hid_string, L"\\Driver\\MouHID");
@@ -211,10 +256,7 @@ QWORD get_mouse_callback_address(MODULE_INFO *mouclass, MODULE_INFO *mouhid)
 	}
 
 	if (mouhid)
-	{
-		mouhid->base = (QWORD)hid_driver_object->DriverStart;
-		mouhid->size = (QWORD)hid_driver_object->DriverSize;
-	}
+		*mouhid = hid_driver_object;
 
 	QWORD result = 0;
 	PDEVICE_OBJECT hid_device_object = hid_driver_object->DeviceObject;
@@ -283,6 +325,15 @@ BOOLEAN hooks::install(void)
 
 	input::vmusbmouse = get_module_info(L"vmusbmouse.sys");
 
+	if (input::vmusbmouse.base != 0)
+	{
+		input::vmware = 1;
+	}
+	else
+	{
+		input::vmware = 0;
+	}
+
 	unsigned char payload[] = {
 		0xFF, 0x25, 0x00, 0x00, 0x00, 0x00,
 		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -295,6 +346,9 @@ BOOLEAN hooks::install(void)
 		return 0;
 	}
 
+	input::oMouseClassRead = input::mouclass->MajorFunction[IRP_MJ_READ];
+	input::mouclass->MajorFunction[IRP_MJ_READ] = input::MouseClassReadHook;
+
 	return 1;
 }
 
@@ -303,6 +357,39 @@ void hooks::uninstall(void)
 	//
 	// uninstall mouse input hook
 	//
-	MemCopyWP((PVOID)input::mouclass_routine, &input::original_bytes, sizeof(input::original_bytes));
+	while (!MemCopyWP((PVOID)input::mouclass_routine, &input::original_bytes, sizeof(input::original_bytes)))
+		;
+	input::mouclass->MajorFunction[IRP_MJ_READ] = input::oMouseClassRead;
 }
 
+/*
+extern "C" __declspec(dllimport) LIST_ENTRY *PsLoadedModuleList;
+PCWSTR GetCallerModuleName(QWORD address, QWORD *offset)
+{
+	PLDR_DATA_TABLE_ENTRY module_entry = CONTAINING_RECORD(PsLoadedModuleList, LDR_DATA_TABLE_ENTRY, InLoadOrderLinks);
+	if (address >= (QWORD)module_entry->ImageBase && address <= (QWORD)((QWORD)module_entry->ImageBase + module_entry->SizeOfImage + 0x1000))
+	{
+			*offset = address - (QWORD)module_entry->ImageBase;
+			if (module_entry->BaseImageName.Length == 0)
+				return L"unknown_name";
+			return (PWCH)module_entry->BaseImageName.Buffer;
+	}
+
+	for (PLIST_ENTRY pListEntry = PsLoadedModuleList->Flink; pListEntry != PsLoadedModuleList; pListEntry = pListEntry->Flink)
+	{
+		module_entry = CONTAINING_RECORD(pListEntry, LDR_DATA_TABLE_ENTRY, InLoadOrderLinks);
+		if (module_entry->ImageBase == 0)
+			continue;
+
+		if (address >= (QWORD)module_entry->ImageBase && address <= (QWORD)((QWORD)module_entry->ImageBase + module_entry->SizeOfImage + 0x1000))
+		{
+			*offset = address - (QWORD)module_entry->ImageBase;
+			if (module_entry->BaseImageName.Length == 0)
+				return L"unknown_name";
+			return (PWCH)module_entry->BaseImageName.Buffer;
+		}
+
+	}
+	return L"unknown";
+}
+*/
