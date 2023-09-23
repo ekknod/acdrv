@@ -10,6 +10,9 @@
 // https://github.com/ekknod/MouseClassServiceCallbackTrick
 // https://github.com/ekknod/MouseClassServiceCallbackMeme
 //
+// legal chain should be something like this:
+// HidpDistributeInterruptReport->IofCompleteRequest->IopfCompleteRequest->MouHid_ReadComplete->MouseClassServiceCallback->MouseClassRead->win32k.sys:rimInputApc
+//
 
 typedef ULONG_PTR QWORD;
 typedef unsigned __int32 DWORD;
