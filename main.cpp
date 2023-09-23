@@ -140,13 +140,12 @@ QWORD hooks::input::MouseClassServiceCallbackHook(
 	//
 	if (return_address < ntoskrnl.base || return_address > (ntoskrnl.base + ntoskrnl.size))
 	{
-		if ((QWORD)_ReturnAddress() < (QWORD)vmusbmouse.base || (QWORD)_ReturnAddress() >(QWORD)((QWORD)vmusbmouse.base + vmusbmouse.size))
-		{
-			b_input_sent=0;
-			return MouseClassServiceCallback(DeviceObject, InputDataStart, InputDataEnd, InputDataConsumed);
-		}
+		b_input_sent=0;
 	}
-	b_input_sent=1;
+	else
+	{
+		b_input_sent=1;
+	}
 	return MouseClassServiceCallback(DeviceObject, InputDataStart, InputDataEnd, InputDataConsumed);
 }
 
@@ -157,6 +156,7 @@ NTSTATUS hooks::input::MouseClassReadHook(PDEVICE_OBJECT device, PIRP irp)
 {
 	//
 	// did MouseClassServiceCallback get called?
+	// only works for real systems. vmware is not supported.
 	//
 	if (b_input_sent == 0 && vmware == 0)
 	{
