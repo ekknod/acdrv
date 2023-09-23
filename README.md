@@ -1,2 +1,5 @@
 # acdrv
-currently it can catch general mouse input manipulation [no HVCI support]  
+currently detects mouse input manipulation  
+[MouseClassServiceCallbackTrick](https://github.com/ekknod/MouseClassServiceCallbackTrick)  
+[MouseClassServiceCallbackMeme](https://github.com/ekknod/MouseClassServiceCallbackMeme)  
+[norsefire](https://github.com/nbqofficial/norsefire)  
