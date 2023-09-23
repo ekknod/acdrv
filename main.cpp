@@ -19,6 +19,8 @@ typedef unsigned __int32 DWORD;
 typedef unsigned __int16 WORD;
 typedef unsigned __int8 BYTE;
 
+#define LOG(...) DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "[driver.sys] " __VA_ARGS__)
+
 typedef struct
 {
 	QWORD base,size;
@@ -84,7 +86,7 @@ extern "C" VOID DriverUnload(
 	hooks::uninstall();
 
 	NtSleep(200);
-	DbgPrintEx(77, 0, "[+] driver is successfully closed\n");
+	LOG("DriverUnload success\n");
 }
 
 extern "C" NTSTATUS DriverEntry(
@@ -94,13 +96,13 @@ extern "C" NTSTATUS DriverEntry(
 {
 	UNREFERENCED_PARAMETER(RegistryPath);
 
-	DbgPrintEx(77, 0, "[+] driver is successfully started\n");
-
 	ntoskrnl = get_module_info(L"ntoskrnl.exe");
 	if (!hooks::install())
 	{
 		return STATUS_ENTRYPOINT_NOT_FOUND;
 	}
+
+	LOG("DriverEntry success\n");
 
 	DriverObject->DriverUnload = DriverUnload;
 	return STATUS_SUCCESS;
@@ -140,11 +142,6 @@ QWORD hooks::input::MouseClassServiceCallbackHook(
 	{
 		if ((QWORD)_ReturnAddress() < (QWORD)vmusbmouse.base || (QWORD)_ReturnAddress() >(QWORD)((QWORD)vmusbmouse.base + vmusbmouse.size))
 		{
-			QWORD thread = (QWORD)PsGetCurrentThread();
-			DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "[%ld] Thread is manipulating mouse [%llx]\n",
-				(DWORD)(QWORD)PsGetThreadId((PETHREAD)thread),
-				thread
-			);
 			b_input_sent=0;
 			return MouseClassServiceCallback(DeviceObject, InputDataStart, InputDataEnd, InputDataConsumed);
 		}
@@ -172,11 +169,7 @@ NTSTATUS hooks::input::MouseClassReadHook(PDEVICE_OBJECT device, PIRP irp)
 		//
 		if (en >= driver_init && (en <= (driver_init + 0x1000)))
 		{
-			QWORD thread = (QWORD)PsGetCurrentThread();
-			DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "[%ld] Thread is manipulating mouse [%llx]\n",
-				(DWORD)(QWORD)PsGetThreadId((PETHREAD)thread),
-				thread
-			);
+			LOG("manual mouse input call detected\n");
 		}
 	}
 	NTSTATUS status = hooks::input::oMouseClassRead(device,irp);
