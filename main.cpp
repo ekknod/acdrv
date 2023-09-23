@@ -68,8 +68,7 @@ namespace hooks
 		PDRIVER_OBJECT mouclass;
 		PDRIVER_OBJECT mouhid;
 		QWORD          mouclass_routine;
-		BOOLEAN        b_input_sent;
-		BOOLEAN        vmware;
+		BOOLEAN        input_sent;
 		unsigned char  original_bytes[14];
 
 		NTSTATUS       (*oMouseClassRead)(PDEVICE_OBJECT device, PIRP irp);
@@ -140,11 +139,11 @@ QWORD hooks::input::MouseClassServiceCallbackHook(
 	//
 	if (return_address < ntoskrnl.base || return_address > (ntoskrnl.base + ntoskrnl.size))
 	{
-		b_input_sent=0;
+		input_sent=0;
 	}
 	else
 	{
-		b_input_sent=1;
+		input_sent=1;
 	}
 	return MouseClassServiceCallback(DeviceObject, InputDataStart, InputDataEnd, InputDataConsumed);
 }
@@ -154,26 +153,19 @@ QWORD hooks::input::MouseClassServiceCallbackHook(
 //
 NTSTATUS hooks::input::MouseClassReadHook(PDEVICE_OBJECT device, PIRP irp)
 {
-	//
-	// did MouseClassServiceCallback get called?
-	// only works for real systems. vmware is not supported.
-	//
-	if (b_input_sent == 0 && vmware == 0)
+	NTSTATUS status = hooks::input::oMouseClassRead(device,irp);
+	if (status == 259)
 	{
-		__int64 v4 = *(QWORD *)((QWORD)irp + 184);
-		QWORD   en = *(QWORD*)(*(QWORD *)(v4 + 48) + 32i64);
-		QWORD   driver_init = (QWORD)mouclass->DriverInit;
-
 		//
-		// this code is approax same as original which is found from MouseClassRead
-		//
-		if (en >= driver_init && (en <= (driver_init + 0x1000)))
+		// did MouseClassServiceCallback get called?
+		// only works for real systems. vmware is not supported.
+		// 
+		if (input_sent == 0 && input::vmusbmouse.base == 0)
 		{
 			LOG("manual mouse input call detected\n");
 		}
+		input_sent = 0;
 	}
-	NTSTATUS status = hooks::input::oMouseClassRead(device,irp);
-	b_input_sent = 0;
 	return status;
 }
 
@@ -330,15 +322,6 @@ BOOLEAN hooks::install(void)
 		return 0;
 
 	input::vmusbmouse = get_module_info(L"vmusbmouse.sys");
-
-	if (input::vmusbmouse.base != 0)
-	{
-		input::vmware = 1;
-	}
-	else
-	{
-		input::vmware = 0;
-	}
 
 	unsigned char payload[] = {
 		0xFF, 0x25, 0x00, 0x00, 0x00, 0x00,
