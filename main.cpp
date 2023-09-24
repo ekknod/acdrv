@@ -61,7 +61,7 @@ namespace hooks
 {
 	BOOLEAN install(void);
 	void    uninstall(void);
-
+	
 	namespace input
 	{
 		MODULE_INFO    vmusbmouse;
@@ -75,6 +75,12 @@ namespace hooks
 		QWORD          MouseClassServiceCallbackHook(PDEVICE_OBJECT DeviceObject, PMOUSE_INPUT_DATA InputDataStart, PMOUSE_INPUT_DATA InputDataEnd, PULONG InputDataConsumed);
 		NTSTATUS       MouseClassReadHook(PDEVICE_OBJECT device, PIRP irp);
 	}
+	
+	namespace exception
+	{
+		void (*oKdTrap)(void);
+		void KdTrapHook();
+	}
 }
 
 extern "C" VOID DriverUnload(
@@ -85,7 +91,7 @@ extern "C" VOID DriverUnload(
 	hooks::uninstall();
 
 	NtSleep(200);
-	LOG("DriverUnload success\n");
+	LOG("Shutdown\n");
 }
 
 extern "C" NTSTATUS DriverEntry(
@@ -101,7 +107,7 @@ extern "C" NTSTATUS DriverEntry(
 		return STATUS_ENTRYPOINT_NOT_FOUND;
 	}
 
-	LOG("DriverEntry success\n");
+	LOG("Running\n");
 
 	DriverObject->DriverUnload = DriverUnload;
 	return STATUS_SUCCESS;
@@ -168,6 +174,58 @@ NTSTATUS hooks::input::MouseClassReadHook(PDEVICE_OBJECT device, PIRP irp)
 		input_sent = 0;
 	}
 	return status;
+}
+
+//
+// 24.09.2023 : added this as researching purposes. decided to keep it, since its fine code.
+// maybe we can find some use for it later :P
+//
+extern "C" __declspec(dllimport) PCSTR PsGetProcessImageFileName(QWORD process);
+void __fastcall hooks::exception::KdTrapHook(void)
+{
+	QWORD KeBugCheckExPtr = (QWORD)KeBugCheckEx;
+	KeBugCheckExPtr       = KeBugCheckExPtr + 0x23;
+	KeBugCheckExPtr       = KeBugCheckExPtr + 0x03;
+	DWORD ctx_offset      = *(DWORD*)KeBugCheckExPtr;
+	struct  _CONTEXT *current_context = *(struct  _CONTEXT **)(__readgsqword(0x20) + ctx_offset);
+
+	//
+	// check if exception was caught
+	//
+	if (current_context->Rip == 0)
+	{
+		return oKdTrap();
+	}
+
+	//
+	// skipping usermode exceptions
+	//
+	/*
+	if (current_context->Rip <= 0x7FFFFFFFFFFF)
+	{
+		return oKdTrap();
+	}
+	*/
+
+	QWORD thread  = __readgsqword(0x188);
+
+	QWORD process = *(QWORD*)(thread + 0xB8);
+
+	QWORD thread_process = *(QWORD*)(thread + 0x98 + 0x20);
+
+	
+	
+	//
+	// exception was caught
+	//
+	LOG("[%s:%s][%llX][%llX] exception was caught\n",
+		PsGetProcessImageFileName(process),
+		PsGetProcessImageFileName(thread_process),
+		__readcr3(),
+		current_context->Rip
+		);
+
+	return oKdTrap();
 }
 
 typedef struct _KLDR_DATA_TABLE_ENTRY {
@@ -308,6 +366,9 @@ BOOLEAN MemCopyWP(PVOID dest, PVOID src, ULONG length)
 	return TRUE;
 }
 
+extern "C" NTSYSCALLAPI NTSTATUS HalPrivateDispatchTable(void);
+QWORD FindPattern(QWORD base, unsigned char* pattern, unsigned char* mask);
+
 BOOLEAN hooks::install(void)
 {
 	//
@@ -339,6 +400,27 @@ BOOLEAN hooks::install(void)
 	input::oMouseClassRead = input::mouclass->MajorFunction[IRP_MJ_READ];
 	input::mouclass->MajorFunction[IRP_MJ_READ] = input::MouseClassReadHook;
 
+
+	//
+	// global exception hook
+	//
+	QWORD KdpDebugRoutineSelect = FindPattern(ntoskrnl.base, (BYTE*)"\x83\x3D\x00\x00\x00\x00\x00\x8A\x44", (BYTE*)"xx????xxx");
+	if (KdpDebugRoutineSelect == 0)
+	{
+		MemCopyWP((PVOID)input::mouclass_routine, &input::original_bytes, sizeof(input::original_bytes));
+		input::mouclass->MajorFunction[IRP_MJ_READ] = input::oMouseClassRead;
+		return 0;
+	}
+
+	KdpDebugRoutineSelect = (KdpDebugRoutineSelect + 7) + *(INT32*)(KdpDebugRoutineSelect + 2);
+	*(DWORD*)(KdpDebugRoutineSelect) = 1;
+
+	//
+	// HalPrivateDispatchTable + 0x328 = xHalTimerWatchdogStop
+	//
+	*(QWORD*)&exception::oKdTrap = *(QWORD*)((QWORD)HalPrivateDispatchTable + 0x328);
+	*(QWORD*)((QWORD)HalPrivateDispatchTable + 0x328) = (QWORD)exception::KdTrapHook;
+
 	return 1;
 }
 
@@ -349,7 +431,13 @@ void hooks::uninstall(void)
 	//
 	while (!MemCopyWP((PVOID)input::mouclass_routine, &input::original_bytes, sizeof(input::original_bytes)))
 		;
+
 	input::mouclass->MajorFunction[IRP_MJ_READ] = input::oMouseClassRead;
+
+	//
+	// uninstall exception hook
+	//
+	*(QWORD*)((QWORD)HalPrivateDispatchTable + 0x328) = (QWORD)exception::oKdTrap;
 }
 
 /*
@@ -383,3 +471,60 @@ PCWSTR GetCallerModuleName(QWORD address, QWORD *offset)
 	return L"unknown";
 }
 */
+
+static int CheckMask(unsigned char* base, unsigned char* pattern, unsigned char* mask)
+{
+	for (; *mask; ++base, ++pattern, ++mask)
+		if (*mask == 'x' && *base != *pattern)
+			return 0;
+	return 1;
+}
+
+void *FindPatternEx(unsigned char* base, QWORD size, unsigned char* pattern, unsigned char* mask)
+{
+	size -= strlen((const char *)mask);
+	for (QWORD i = 0; i <= size; ++i) {
+		void* addr = &base[i];
+		if (CheckMask((unsigned char *)addr, pattern, mask))
+			return addr;
+	}
+	return 0;
+}
+
+QWORD FindPattern(QWORD base, unsigned char* pattern, unsigned char* mask)
+{
+	if (base == 0)
+	{
+		return 0;
+	}
+
+	QWORD nt_header = (QWORD)*(DWORD*)(base + 0x03C) + base;
+	if (nt_header == base)
+	{
+		return 0;
+	}
+
+	WORD machine = *(WORD*)(nt_header + 0x4);
+	QWORD section_header = machine == 0x8664 ?
+		nt_header + 0x0108 :
+		nt_header + 0x00F8;
+
+	for (WORD i = 0; i < *(WORD*)(nt_header + 0x06); i++) {
+		QWORD section = section_header + ((QWORD)i * 40);
+		DWORD section_characteristics = *(DWORD*)(section + 0x24);
+
+		if (section_characteristics & 0x00000020 && !(section_characteristics & 0x02000000))
+		{
+			QWORD virtual_address = base + (QWORD)*(DWORD*)(section + 0x0C);
+			DWORD virtual_size = *(DWORD*)(section + 0x08);
+
+			QWORD addr = (QWORD)FindPatternEx( (unsigned char*)virtual_address, virtual_size, pattern, mask);
+			if (addr)
+			{
+				return addr;
+			}
+		}
+	}
+	return 0;
+}
+
