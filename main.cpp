@@ -78,6 +78,8 @@ namespace hooks
 	
 	namespace exception
 	{
+		QWORD KdpDebugRoutineSelect;
+		QWORD PoHiderInProgress;
 		void (*oKdTrap)(void);
 		void KdTrapHook();
 	}
@@ -104,6 +106,7 @@ extern "C" NTSTATUS DriverEntry(
 	ntoskrnl = get_module_info(L"ntoskrnl.exe");
 	if (!hooks::install())
 	{
+		LOG("failed to install hooks\n");
 		return STATUS_ENTRYPOINT_NOT_FOUND;
 	}
 
@@ -183,6 +186,12 @@ NTSTATUS hooks::input::MouseClassReadHook(PDEVICE_OBJECT device, PIRP irp)
 extern "C" __declspec(dllimport) PCSTR PsGetProcessImageFileName(QWORD process);
 void __fastcall hooks::exception::KdTrapHook(void)
 {
+	//
+	// disable upcoming DPC call
+	//
+	*(BYTE*)(exception::PoHiderInProgress) = 1;
+
+
 	QWORD KeBugCheckExPtr = (QWORD)KeBugCheckEx;
 	KeBugCheckExPtr       = KeBugCheckExPtr + 0x23;
 	KeBugCheckExPtr       = KeBugCheckExPtr + 0x03;
@@ -404,16 +413,25 @@ BOOLEAN hooks::install(void)
 	//
 	// global exception hook
 	//
-	QWORD KdpDebugRoutineSelect = FindPattern(ntoskrnl.base, (BYTE*)"\x83\x3D\x00\x00\x00\x00\x00\x8A\x44", (BYTE*)"xx????xxx");
-	if (KdpDebugRoutineSelect == 0)
+	exception::KdpDebugRoutineSelect = FindPattern(ntoskrnl.base, (BYTE*)"\x83\x3D\x00\x00\x00\x00\x00\x8A\x44", (BYTE*)"xx????xxx");
+	if (exception::KdpDebugRoutineSelect == 0)
 	{
+	E0:
 		MemCopyWP((PVOID)input::mouclass_routine, &input::original_bytes, sizeof(input::original_bytes));
 		input::mouclass->MajorFunction[IRP_MJ_READ] = input::oMouseClassRead;
 		return 0;
 	}
 
-	KdpDebugRoutineSelect = (KdpDebugRoutineSelect + 7) + *(INT32*)(KdpDebugRoutineSelect + 2);
-	*(DWORD*)(KdpDebugRoutineSelect) = 1;
+	exception::PoHiderInProgress = FindPattern(ntoskrnl.base, (BYTE*)"\xC6\x05\x00\x00\x00\x00\x01\x33\xC9\xE8", (BYTE*)"xx????xxxx");
+	if (exception::PoHiderInProgress == 0)
+	{
+		goto E0;
+	}
+
+	exception::KdpDebugRoutineSelect = (exception::KdpDebugRoutineSelect + 7) + *(INT32*)(exception::KdpDebugRoutineSelect + 2);
+	exception::PoHiderInProgress = (exception::PoHiderInProgress + 7) + *(INT32*)(exception::PoHiderInProgress + 2);
+	*(DWORD*)(exception::KdpDebugRoutineSelect) = 1;
+
 
 	//
 	// HalPrivateDispatchTable + 0x328 = xHalTimerWatchdogStop
@@ -438,6 +456,8 @@ void hooks::uninstall(void)
 	// uninstall exception hook
 	//
 	*(QWORD*)((QWORD)HalPrivateDispatchTable + 0x328) = (QWORD)exception::oKdTrap;
+	*(DWORD*)(exception::KdpDebugRoutineSelect) = 0;
+	*(BYTE*)(exception::PoHiderInProgress) = 0;
 }
 
 /*
