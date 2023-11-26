@@ -564,8 +564,8 @@ void hooks::uninstall(void)
 	// set KiCpuTracingFlags 0
 	//
 	QWORD KiCpuTracingFlags = (QWORD)KeBugCheckEx;
-	while (*(unsigned char*)KiCpuTracingFlags != 0xE8) KiCpuTracingFlags++; KiCpuTracingFlags++;
-	while (*(unsigned char*)KiCpuTracingFlags != 0xE8) KiCpuTracingFlags++;
+	while (*(unsigned short*)KiCpuTracingFlags != 0xE800) KiCpuTracingFlags++; KiCpuTracingFlags+=2;
+	while (*(unsigned short*)KiCpuTracingFlags != 0xE800) KiCpuTracingFlags++; KiCpuTracingFlags++;
 	KiCpuTracingFlags = (KiCpuTracingFlags + 5) + *(int*)(KiCpuTracingFlags + 1);
 	while (*(unsigned short*)KiCpuTracingFlags != 0x05F7) KiCpuTracingFlags++;
 	KiCpuTracingFlags = (KiCpuTracingFlags + 10) + *(int*)(KiCpuTracingFlags + 2);
