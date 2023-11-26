@@ -83,6 +83,12 @@ namespace hooks
 		void (*oKdTrap)(void);
 		void KdTrapHook();
 	}
+
+	namespace swap_ctx
+	{
+		UCHAR (*oHalClearLastBranchRecordStack)(void);
+		UCHAR HalClearLastBranchRecordStackHook();
+	}
 }
 
 extern "C" VOID DriverUnload(
@@ -198,13 +204,15 @@ void __fastcall hooks::exception::KdTrapHook(void)
 	DWORD ctx_offset      = *(DWORD*)KeBugCheckExPtr;
 	struct  _CONTEXT *current_context = *(struct  _CONTEXT **)(__readgsqword(0x20) + ctx_offset);
 
+
 	//
 	// check if exception was caught
 	//
-	if (current_context->Rip == 0)
+	if (current_context == 0 || current_context->Rip == 0)
 	{
 		return oKdTrap();
 	}
+
 
 	//
 	// skipping usermode exceptions
@@ -216,13 +224,11 @@ void __fastcall hooks::exception::KdTrapHook(void)
 	}
 	*/
 
+
 	QWORD thread  = __readgsqword(0x188);
-
 	QWORD process = *(QWORD*)(thread + 0xB8);
-
 	QWORD thread_process = *(QWORD*)(thread + 0x98 + 0x20);
-
-	
+		
 	
 	//
 	// exception was caught
@@ -235,6 +241,75 @@ void __fastcall hooks::exception::KdTrapHook(void)
 		);
 
 	return oKdTrap();
+}
+
+BOOLEAN is_unlinked_thread(QWORD process, QWORD thread)
+{
+	PLIST_ENTRY list_head = (PLIST_ENTRY)((QWORD)process + 0x30);
+	PLIST_ENTRY list_entry = list_head;
+
+	QWORD entry = (QWORD)((char*)list_entry - 0x2f8);
+	if (entry == thread)
+	{
+		return 0;
+	}
+
+	while ((list_entry = list_entry->Flink) != 0 && list_entry != list_head)
+	{
+		entry = (QWORD)((char*)list_entry - 0x2f8);
+		if (entry == thread)
+		{
+			return 0;
+		}
+	}
+	return 1;
+}
+
+BOOLEAN unlink_thread_detection(QWORD thread)
+{
+	BOOLEAN hidden = 0;
+
+	if (thread == 0)
+		return 0;
+
+	QWORD host_process = *(QWORD*)(thread + 0x220);
+
+	QWORD lookup_thread;
+	if (NT_SUCCESS(PsLookupThreadByThreadId(
+		(HANDLE)PsGetThreadId((PETHREAD)thread),
+		(PETHREAD*)&lookup_thread
+	)))
+	{
+		if (lookup_thread == thread)
+		{
+			return 0;
+		}
+	}
+
+	if (is_unlinked_thread(host_process, thread))
+	{
+		LOG("[%s][%ld] Thread is unlinked [%llx]\n",
+			PsGetProcessImageFileName(host_process),
+			(DWORD)(QWORD)PsGetThreadId((PETHREAD)thread),
+			thread
+		);
+		hidden = 1;
+	}
+
+	return hidden;
+}
+
+UCHAR __fastcall hooks::swap_ctx::HalClearLastBranchRecordStackHook(void)
+{
+	QWORD current_thread  = __readgsqword(0x188);
+	QWORD cr3 = __readcr3();
+
+	if (unlink_thread_detection(current_thread))
+	{
+		LOG("[%lld] SwapContext: %llx, %llx\n", PsGetCurrentThreadId(), current_thread, cr3);
+	}
+
+	return swap_ctx::oHalClearLastBranchRecordStack();
 }
 
 typedef struct _KLDR_DATA_TABLE_ENTRY {
@@ -434,10 +509,29 @@ BOOLEAN hooks::install(void)
 
 
 	//
-	// HalPrivateDispatchTable + 0x328 = xHalTimerWatchdogStop
+	// HalPrivateDispatchTable + 0x328 = xHalTimerWatchdogStop/xHalTimerWatchdogStart
 	//
 	*(QWORD*)&exception::oKdTrap = *(QWORD*)((QWORD)HalPrivateDispatchTable + 0x328);
 	*(QWORD*)((QWORD)HalPrivateDispatchTable + 0x328) = (QWORD)exception::KdTrapHook;
+
+
+	//
+	// HalPrivateDispatchTable + 0x400 = HalClearLastBranchRecordStack 
+	//
+	*(QWORD*)&swap_ctx::oHalClearLastBranchRecordStack = *(QWORD*)((QWORD)HalPrivateDispatchTable + 0x400);
+	*(QWORD*)((QWORD)HalPrivateDispatchTable + 0x400) = (QWORD)swap_ctx::HalClearLastBranchRecordStackHook;
+
+
+	//
+	// set KiCpuTracingFlags 2
+	//
+	QWORD KiCpuTracingFlags = (QWORD)KeBugCheckEx;
+	while (*(unsigned short*)KiCpuTracingFlags != 0xE800) KiCpuTracingFlags++; KiCpuTracingFlags+=2;
+	while (*(unsigned short*)KiCpuTracingFlags != 0xE800) KiCpuTracingFlags++; KiCpuTracingFlags++;
+	KiCpuTracingFlags = (KiCpuTracingFlags + 5) + *(int*)(KiCpuTracingFlags + 1);
+	while (*(unsigned short*)KiCpuTracingFlags != 0x05F7) KiCpuTracingFlags++;
+	KiCpuTracingFlags = (KiCpuTracingFlags + 10) + *(int*)(KiCpuTracingFlags + 2);
+	*(BYTE*)(KiCpuTracingFlags) = 2;
 
 	return 1;
 }
@@ -458,39 +552,25 @@ void hooks::uninstall(void)
 	*(QWORD*)((QWORD)HalPrivateDispatchTable + 0x328) = (QWORD)exception::oKdTrap;
 	*(DWORD*)(exception::KdpDebugRoutineSelect) = 0;
 	*(BYTE*)(exception::PoHiderInProgress) = 0;
+
+
+	//
+	// uninstall swap context hook
+	//
+	*(QWORD*)((QWORD)HalPrivateDispatchTable + 0x400) = *(QWORD*)&swap_ctx::oHalClearLastBranchRecordStack;
+
+
+	//
+	// set KiCpuTracingFlags 0
+	//
+	QWORD KiCpuTracingFlags = (QWORD)KeBugCheckEx;
+	while (*(unsigned char*)KiCpuTracingFlags != 0xE8) KiCpuTracingFlags++; KiCpuTracingFlags++;
+	while (*(unsigned char*)KiCpuTracingFlags != 0xE8) KiCpuTracingFlags++;
+	KiCpuTracingFlags = (KiCpuTracingFlags + 5) + *(int*)(KiCpuTracingFlags + 1);
+	while (*(unsigned short*)KiCpuTracingFlags != 0x05F7) KiCpuTracingFlags++;
+	KiCpuTracingFlags = (KiCpuTracingFlags + 10) + *(int*)(KiCpuTracingFlags + 2);
+	*(BYTE*)(KiCpuTracingFlags) = 0;
 }
-
-/*
-extern "C" __declspec(dllimport) LIST_ENTRY *PsLoadedModuleList;
-PCWSTR GetCallerModuleName(QWORD address, QWORD *offset)
-{
-	PLDR_DATA_TABLE_ENTRY module_entry = CONTAINING_RECORD(PsLoadedModuleList, LDR_DATA_TABLE_ENTRY, InLoadOrderLinks);
-	if (address >= (QWORD)module_entry->ImageBase && address <= (QWORD)((QWORD)module_entry->ImageBase + module_entry->SizeOfImage + 0x1000))
-	{
-			*offset = address - (QWORD)module_entry->ImageBase;
-			if (module_entry->BaseImageName.Length == 0)
-				return L"unknown_name";
-			return (PWCH)module_entry->BaseImageName.Buffer;
-	}
-
-	for (PLIST_ENTRY pListEntry = PsLoadedModuleList->Flink; pListEntry != PsLoadedModuleList; pListEntry = pListEntry->Flink)
-	{
-		module_entry = CONTAINING_RECORD(pListEntry, LDR_DATA_TABLE_ENTRY, InLoadOrderLinks);
-		if (module_entry->ImageBase == 0)
-			continue;
-
-		if (address >= (QWORD)module_entry->ImageBase && address <= (QWORD)((QWORD)module_entry->ImageBase + module_entry->SizeOfImage + 0x1000))
-		{
-			*offset = address - (QWORD)module_entry->ImageBase;
-			if (module_entry->BaseImageName.Length == 0)
-				return L"unknown_name";
-			return (PWCH)module_entry->BaseImageName.Buffer;
-		}
-
-	}
-	return L"unknown";
-}
-*/
 
 static int CheckMask(unsigned char* base, unsigned char* pattern, unsigned char* mask)
 {
