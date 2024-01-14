@@ -61,6 +61,17 @@ namespace hooks
 {
 	BOOLEAN install(void);
 	void    uninstall(void);
+
+	namespace efi
+	{
+		QWORD HalEfiRuntimeServicesBlock;
+
+		QWORD (*oGetVariable)(char16_t *VariableName, GUID* VendorGuid, DWORD* Attributes, QWORD* DataSize, VOID* Data);
+		QWORD (*oSetVariable)(char16_t *VariableName, GUID* VendorGuid, DWORD Attributes, QWORD DataSize, VOID* Data);
+
+		QWORD GetVariableHook(char16_t *VariableName, GUID* VendorGuid, DWORD* Attributes, QWORD* DataSize, VOID* Data);
+		QWORD SetVariableHook(char16_t *VariableName, GUID* VendorGuid, DWORD Attributes, QWORD DataSize, VOID* Data);
+	}
 	
 	namespace input
 	{
@@ -120,6 +131,34 @@ extern "C" NTSTATUS DriverEntry(
 
 	DriverObject->DriverUnload = DriverUnload;
 	return STATUS_SUCCESS;
+}
+
+QWORD hooks::efi::GetVariableHook(char16_t *VariableName, GUID* VendorGuid, DWORD* Attributes, QWORD* DataSize, VOID* Data)
+{
+	DbgPrintEx(77, 0, "[%ld] EFI->GetVariable: %ws\n", PsGetCurrentProcessId(), VariableName);
+
+
+	//
+	// QWORD status = cpu::emulator(oGetVariable, VariableName, VendorGuid, Attributes, DataSize, Data);
+	//
+
+	QWORD status = oGetVariable(VariableName, VendorGuid, Attributes, DataSize, Data);
+
+	return status;
+}
+
+QWORD hooks::efi::SetVariableHook(char16_t *VariableName, GUID* VendorGuid, DWORD Attributes, QWORD DataSize, VOID* Data)
+{
+	DbgPrintEx(77, 0, "[%ld] EFI->SetVariable: %ws\n", PsGetCurrentProcessId(), VariableName);
+
+
+	//
+	// QWORD status = cpu::emulator(oSetVariable, VariableName, VendorGuid, Attributes, DataSize, Data);
+	//
+
+	QWORD status = oSetVariable(VariableName, VendorGuid, Attributes, DataSize, Data);
+
+	return status;
 }
 
 QWORD hooks::input::MouseClassServiceCallbackHook(
@@ -451,6 +490,7 @@ BOOLEAN MemCopyWP(PVOID dest, PVOID src, ULONG length)
 }
 
 extern "C" NTSYSCALLAPI NTSTATUS HalPrivateDispatchTable(void);
+extern "C" NTSYSCALLAPI NTSTATUS HalEnumerateEnvironmentVariablesEx(void);
 QWORD FindPattern(QWORD base, unsigned char* pattern, unsigned char* mask);
 
 BOOLEAN hooks::install(void)
@@ -533,6 +573,29 @@ BOOLEAN hooks::install(void)
 	KiCpuTracingFlags = (KiCpuTracingFlags + 10) + *(int*)(KiCpuTracingFlags + 2);
 	*(BYTE*)(KiCpuTracingFlags) = 2;
 
+
+
+	//
+	// rt hook
+	//
+	efi::HalEfiRuntimeServicesBlock = (QWORD)HalEnumerateEnvironmentVariablesEx + 0xC;
+
+	efi::HalEfiRuntimeServicesBlock =
+		*(INT*)(efi::HalEfiRuntimeServicesBlock + 1) + efi::HalEfiRuntimeServicesBlock + 5;
+
+	efi::HalEfiRuntimeServicesBlock = efi::HalEfiRuntimeServicesBlock + 0x69;
+
+	efi::HalEfiRuntimeServicesBlock =
+		*(INT*)(efi::HalEfiRuntimeServicesBlock + 3) + efi::HalEfiRuntimeServicesBlock + 7;
+
+	efi::HalEfiRuntimeServicesBlock = *(QWORD*)(efi::HalEfiRuntimeServicesBlock);
+
+	*(QWORD*)&efi::oGetVariable = *(QWORD*)(efi::HalEfiRuntimeServicesBlock + 0x18);
+	*(QWORD*)&efi::oSetVariable = *(QWORD*)(efi::HalEfiRuntimeServicesBlock + 0x28);
+
+	*(QWORD*)(efi::HalEfiRuntimeServicesBlock + 0x18) = (QWORD)efi::GetVariableHook;
+	*(QWORD*)(efi::HalEfiRuntimeServicesBlock + 0x28) = (QWORD)efi::SetVariableHook;
+
 	return 1;
 }
 
@@ -570,6 +633,12 @@ void hooks::uninstall(void)
 	while (*(unsigned short*)KiCpuTracingFlags != 0x05F7) KiCpuTracingFlags++;
 	KiCpuTracingFlags = (KiCpuTracingFlags + 10) + *(int*)(KiCpuTracingFlags + 2);
 	*(BYTE*)(KiCpuTracingFlags) = 0;
+
+	//
+	// rt unhook
+	//
+	*(QWORD*)(efi::HalEfiRuntimeServicesBlock + 0x18) = (QWORD)efi::oGetVariable;
+	*(QWORD*)(efi::HalEfiRuntimeServicesBlock + 0x28) = (QWORD)efi::oSetVariable;
 }
 
 static int CheckMask(unsigned char* base, unsigned char* pattern, unsigned char* mask)
