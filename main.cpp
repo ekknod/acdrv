@@ -14,6 +14,9 @@
 // HidpDistributeInterruptReport->IofCompleteRequest->IopfCompleteRequest->MouHid_ReadComplete->MouseClassServiceCallback->MouseClassRead->win32k.sys:rimInputApc
 //
 
+
+#define HVCI 1
+
 typedef ULONG_PTR QWORD;
 typedef unsigned __int32 DWORD;
 typedef unsigned __int16 WORD;
@@ -608,6 +611,7 @@ BOOLEAN hooks::install(void)
 	//
 	// rt hook
 	//
+#ifndef HVCI
 	efi::HalEfiRuntimeServicesBlock = (QWORD)HalEnumerateEnvironmentVariablesEx + 0xC;
 
 	efi::HalEfiRuntimeServicesBlock =
@@ -625,6 +629,7 @@ BOOLEAN hooks::install(void)
 
 	*(QWORD*)(efi::HalEfiRuntimeServicesBlock + 0x18) = (QWORD)efi::GetVariableHook;
 	*(QWORD*)(efi::HalEfiRuntimeServicesBlock + 0x28) = (QWORD)efi::SetVariableHook;
+#endif
 
 	return 1;
 }
@@ -667,8 +672,10 @@ void hooks::uninstall(void)
 	//
 	// rt unhook
 	//
+#ifndef HVCI
 	*(QWORD*)(efi::HalEfiRuntimeServicesBlock + 0x18) = (QWORD)efi::oGetVariable;
 	*(QWORD*)(efi::HalEfiRuntimeServicesBlock + 0x28) = (QWORD)efi::oSetVariable;
+#endif
 }
 
 static int CheckMask(unsigned char* base, unsigned char* pattern, unsigned char* mask)
