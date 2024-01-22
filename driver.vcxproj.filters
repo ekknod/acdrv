@@ -23,9 +23,4 @@
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
-  <ItemGroup>
-    <MASM Include="mouse.asm">
-      <Filter>Source Files</Filter>
-    </MASM>
-  </ItemGroup>
 </Project>

@@ -3,7 +3,7 @@
 #include <intrin.h>
 
 //
-// detecting MouseClassServiceCallback manipulation (Non HVCI systems).
+// detecting MouseClassServiceCallback manipulation
 // 
 // e.g.
 // https://github.com/nbqofficial/norsefire
@@ -113,13 +113,21 @@ extern "C" VOID DriverUnload(
 	LOG("Shutdown\n");
 }
 
+extern "C" NTSYSCALLAPI
+NTSTATUS
+PsGetContextThread(
+      __in PETHREAD Thread,
+      __inout PCONTEXT ThreadContext,
+      __in KPROCESSOR_MODE Mode
+  );
+
 extern "C" NTSTATUS DriverEntry(
 	_In_ PDRIVER_OBJECT  DriverObject,
 	_In_ PUNICODE_STRING RegistryPath
 )
 {
 	UNREFERENCED_PARAMETER(RegistryPath);
-
+		
 	ntoskrnl = get_module_info(L"ntoskrnl.exe");
 	if (!hooks::install())
 	{
@@ -170,6 +178,8 @@ QWORD hooks::input::MouseClassServiceCallbackHook(
 {
 	QWORD rsp = (QWORD)_AddressOfReturnAddress();
 
+
+
 	rsp = rsp + 0x08;  // call MouseClassServiceCallback
 	rsp = rsp + 0x08;  // push rbp
 	rsp = rsp + 0x08;  // push rbx
@@ -200,7 +210,13 @@ QWORD hooks::input::MouseClassServiceCallbackHook(
 	{
 		input_sent = 0;
 	}
-	return MouseClassServiceCallback(DeviceObject, InputDataStart, InputDataEnd, InputDataConsumed);
+
+	return ((QWORD(*)(PDEVICE_OBJECT, PMOUSE_INPUT_DATA, PMOUSE_INPUT_DATA, PULONG))(mouclass_routine))(
+		DeviceObject,
+		InputDataStart,
+		InputDataEnd,
+		InputDataConsumed
+		);
 }
 
 //
@@ -390,6 +406,38 @@ MODULE_INFO get_module_info(PWCH module_name)
 	return {};
 }
 
+extern "C" __declspec(dllimport) LIST_ENTRY *PsLoadedModuleList;
+PCWSTR GetCallerModuleName(QWORD address, QWORD *offset)
+{
+	PLDR_DATA_TABLE_ENTRY module_entry = CONTAINING_RECORD(PsLoadedModuleList, LDR_DATA_TABLE_ENTRY, InLoadOrderLinks);
+	if (address >= (QWORD)module_entry->ImageBase && address <= (QWORD)((QWORD)module_entry->ImageBase + module_entry->SizeOfImage + 0x1000))
+	{
+		if (offset)
+			*offset = address - (QWORD)module_entry->ImageBase;
+		if (module_entry->BaseImageName.Length == 0)
+			return L"unknown";
+		return (PWCH)module_entry->BaseImageName.Buffer;
+	}
+
+	for (PLIST_ENTRY pListEntry = PsLoadedModuleList->Flink; pListEntry != PsLoadedModuleList; pListEntry = pListEntry->Flink)
+	{
+		module_entry = CONTAINING_RECORD(pListEntry, LDR_DATA_TABLE_ENTRY, InLoadOrderLinks);
+		if (module_entry->ImageBase == 0)
+			continue;
+
+		if (address >= (QWORD)module_entry->ImageBase && address <= (QWORD)((QWORD)module_entry->ImageBase + module_entry->SizeOfImage + 0x1000))
+		{
+			if (offset)
+				*offset = address - (QWORD)module_entry->ImageBase;
+			if (module_entry->BaseImageName.Length == 0)
+				return L"unknown";
+			return (PWCH)module_entry->BaseImageName.Buffer;
+		}
+
+	}
+	return L"unknown";
+}
+
 extern "C" NTSYSCALLAPI
 NTSTATUS
 ObReferenceObjectByName(
@@ -405,7 +453,7 @@ ObReferenceObjectByName(
 
 extern "C" NTSYSCALLAPI POBJECT_TYPE* IoDriverObjectType;
 
-QWORD get_mouse_callback_address(PDRIVER_OBJECT *mouclass, PDRIVER_OBJECT *mouhid)
+QWORD hook_mouse_devices(QWORD new_callback, PDRIVER_OBJECT *mouclass, PDRIVER_OBJECT *mouhid)
 {
 	//
 	// https://github.com/nbqofficial/norsefire
@@ -431,7 +479,6 @@ QWORD get_mouse_callback_address(PDRIVER_OBJECT *mouclass, PDRIVER_OBJECT *mouhi
 	status = ObReferenceObjectByName(&hid_string, OBJ_CASE_INSENSITIVE, 0, 0, *IoDriverObjectType, KernelMode, 0, (PVOID*)&hid_driver_object);
 	if (!NT_SUCCESS(status))
 	{
-		ObfDereferenceObject(class_driver_object);
 		return 0;
 	}
 
@@ -446,47 +493,58 @@ QWORD get_mouse_callback_address(PDRIVER_OBJECT *mouclass, PDRIVER_OBJECT *mouhi
 		while (class_device_object)
 		{
 			PULONG_PTR device_extension = (PULONG_PTR)hid_device_object->DeviceExtension;
-			ULONG_PTR device_ext_size = ((ULONG_PTR)hid_device_object->DeviceObjectExtension - (ULONG_PTR)hid_device_object->DeviceExtension) / 4;
+
+			ULONG_PTR device_ext_size = ((ULONG_PTR)hid_device_object->DeviceObjectExtension -
+				(ULONG_PTR)hid_device_object->DeviceExtension) / 4;
 			for (ULONG_PTR i = 0; i < device_ext_size; i++)
 			{
-				if (device_extension[i] == (ULONG_PTR)class_device_object && device_extension[i + 1] > (ULONG_PTR)class_driver_object)
+				if (!result)
 				{
-					result = (QWORD)(device_extension[i + 1]);
-					goto E0;
+					if (device_extension[i] == (ULONG_PTR)class_device_object &&
+						device_extension[i + 1] > (ULONG_PTR)class_driver_object)
+					{
+						result = (QWORD)(device_extension[i + 1]);
+						device_extension[i + 1] = new_callback;
+					}
+				}
+				else
+				{
+					if (device_extension[i] == result)
+					{
+						device_extension[i] = new_callback;
+					}
 				}
 			}
 			class_device_object = class_device_object->NextDevice;
 		}
 		hid_device_object = hid_device_object->AttachedDevice;
 	}
-E0:
-	ObfDereferenceObject(class_driver_object);
-	ObfDereferenceObject(hid_driver_object);
 	return result;
 }
 
-BOOLEAN MemCopyWP(PVOID dest, PVOID src, ULONG length)
+void unhook_mouse_devices(QWORD callback, QWORD original_callback, PDRIVER_OBJECT mouclass, PDRIVER_OBJECT mouhid)
 {
-	PMDL mdl = IoAllocateMdl(dest, length, FALSE, FALSE, NULL);
-	if (!mdl) {
-		return FALSE;
+	PDEVICE_OBJECT hid_device_object = mouhid->DeviceObject;
+	while (hid_device_object)
+	{
+		PDEVICE_OBJECT class_device_object = mouclass->DeviceObject;
+		while (class_device_object)
+		{
+			PULONG_PTR device_extension = (PULONG_PTR)hid_device_object->DeviceExtension;
+			ULONG_PTR device_ext_size =
+				((ULONG_PTR)hid_device_object->DeviceObjectExtension - (ULONG_PTR)hid_device_object->DeviceExtension) / 4;
+
+			for (ULONG_PTR i = 0; i < device_ext_size; i++)
+			{
+				if (device_extension[i] == callback)
+				{
+					device_extension[i] = original_callback;
+				}
+			}
+			class_device_object = class_device_object->NextDevice;
+		}
+		hid_device_object = hid_device_object->AttachedDevice;
 	}
-
-	MmProbeAndLockPages(mdl, KernelMode, IoModifyAccess);
-
-	PVOID mapped = MmMapLockedPagesSpecifyCache(mdl, KernelMode, MmNonCached, NULL, 0, HighPagePriority);
-	if (!mapped) {
-		MmUnlockPages(mdl);
-		IoFreeMdl(mdl);
-		return FALSE;
-	}
-
-	memcpy(mapped, src, length);
-
-	MmUnmapLockedPages(mapped, mdl);
-	MmUnlockPages(mdl);
-	IoFreeMdl(mdl);
-	return TRUE;
 }
 
 extern "C" NTSYSCALLAPI NTSTATUS HalPrivateDispatchTable(void);
@@ -503,23 +561,11 @@ BOOLEAN hooks::install(void)
 	_IofCompleteRequest = (QWORD)IofCompleteRequest;
 	_IoReleaseRemoveLockEx = (QWORD)IoReleaseRemoveLockEx;
 
-	input::mouclass_routine = get_mouse_callback_address(&input::mouclass, &input::mouhid);
+	input::mouclass_routine = hook_mouse_devices((QWORD)input::MouseClassServiceCallbackHook, &input::mouclass, &input::mouhid);
 	if (input::mouclass_routine == 0)
 		return 0;
 
 	input::vmusbmouse = get_module_info(L"vmusbmouse.sys");
-
-	unsigned char payload[] = {
-		0xFF, 0x25, 0x00, 0x00, 0x00, 0x00,
-		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-	};
-	*(QWORD*)(payload + 0x06) = (QWORD)input::MouseClassServiceCallbackHook;
-
-	memcpy(input::original_bytes, (const void*)input::mouclass_routine, sizeof(input::original_bytes));
-	if (!MemCopyWP((PVOID)input::mouclass_routine, &payload, sizeof(payload)))
-	{
-		return 0;
-	}
 
 	input::oMouseClassRead = input::mouclass->MajorFunction[IRP_MJ_READ];
 	input::mouclass->MajorFunction[IRP_MJ_READ] = input::MouseClassReadHook;
@@ -532,7 +578,7 @@ BOOLEAN hooks::install(void)
 	if (exception::KdpDebugRoutineSelect == 0)
 	{
 	E0:
-		MemCopyWP((PVOID)input::mouclass_routine, &input::original_bytes, sizeof(input::original_bytes));
+		unhook_mouse_devices((QWORD)input::MouseClassServiceCallbackHook, input::mouclass_routine, input::mouclass, input::mouhid);
 		input::mouclass->MajorFunction[IRP_MJ_READ] = input::oMouseClassRead;
 		return 0;
 	}
@@ -604,8 +650,7 @@ void hooks::uninstall(void)
 	//
 	// uninstall mouse input hook
 	//
-	while (!MemCopyWP((PVOID)input::mouclass_routine, &input::original_bytes, sizeof(input::original_bytes)))
-		;
+	unhook_mouse_devices((QWORD)input::MouseClassServiceCallbackHook, input::mouclass_routine, input::mouclass, input::mouhid);
 
 	input::mouclass->MajorFunction[IRP_MJ_READ] = input::oMouseClassRead;
 
@@ -696,4 +741,3 @@ QWORD FindPattern(QWORD base, unsigned char* pattern, unsigned char* mask)
 	}
 	return 0;
 }
-
