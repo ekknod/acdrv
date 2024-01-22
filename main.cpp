@@ -1,7 +1,7 @@
 #include <ntifs.h>
 #include <ntddmou.h>
+#include <kbdmou.h>
 #include <intrin.h>
-
 //
 // detecting MouseClassServiceCallback manipulation
 // 
@@ -27,22 +27,6 @@ typedef struct
 } MODULE_INFO ;
 
 MODULE_INFO ntoskrnl;
-
-extern "C"
-{
-	//
-	// mandatory global variables
-	//
-	QWORD _KeAcquireSpinLockAtDpcLevel;
-	QWORD _KeReleaseSpinLockFromDpcLevel;
-	QWORD _IofCompleteRequest;
-	QWORD _IoReleaseRemoveLockEx;
-
-	//
-	// declarations
-	//
-	QWORD MouseClassServiceCallback(PDEVICE_OBJECT, PMOUSE_INPUT_DATA, PMOUSE_INPUT_DATA, PULONG);
-}
 
 MODULE_INFO get_module_info(PWCH module_name);
 void NtSleep(DWORD milliseconds)
@@ -80,11 +64,14 @@ namespace hooks
 		PDRIVER_OBJECT mouhid;
 		QWORD          mouclass_routine;
 		BOOLEAN        input_sent;
-		unsigned char  original_bytes[14];
+		BOOLEAN        flush;
 
 		NTSTATUS       (*oMouseClassRead)(PDEVICE_OBJECT device, PIRP irp);
+		NTSTATUS       (*oMouseAddDevice)(PDRIVER_OBJECT DriverObject, PDEVICE_OBJECT PhysicalDeviceObject);
+
 		QWORD          MouseClassServiceCallbackHook(PDEVICE_OBJECT DeviceObject, PMOUSE_INPUT_DATA InputDataStart, PMOUSE_INPUT_DATA InputDataEnd, PULONG InputDataConsumed);
 		NTSTATUS       MouseClassReadHook(PDEVICE_OBJECT device, PIRP irp);
+		NTSTATUS       MouseAddDeviceHook(IN PDRIVER_OBJECT DriverObject, IN PDEVICE_OBJECT PhysicalDeviceObject);
 	}
 	
 	namespace exception
@@ -233,9 +220,24 @@ NTSTATUS hooks::input::MouseClassReadHook(PDEVICE_OBJECT device, PIRP irp)
 		// 
 		if (input_sent == 0 && input::vmusbmouse.base == 0)
 		{
-			LOG("manual mouse input call detected\n");
+			if (!flush)
+				LOG("manual mouse input call detected\n");
+			else
+				flush = 0;
 		}
 		input_sent = 0;
+	}
+	return status;
+}
+
+void flush_mouse_devices(QWORD callback, QWORD original_callback, PDRIVER_OBJECT mouclass, PDRIVER_OBJECT mouhid);
+NTSTATUS hooks::input::MouseAddDeviceHook(IN PDRIVER_OBJECT DriverObject, IN PDEVICE_OBJECT PhysicalDeviceObject)
+{
+	flush = 1;
+	NTSTATUS status = oMouseAddDevice(DriverObject, PhysicalDeviceObject);
+	if (status == 0)
+	{
+		flush_mouse_devices((QWORD)MouseClassServiceCallbackHook, (QWORD)mouclass_routine, mouclass, mouhid);
 	}
 	return status;
 }
@@ -522,6 +524,31 @@ QWORD hook_mouse_devices(QWORD new_callback, PDRIVER_OBJECT *mouclass, PDRIVER_O
 	return result;
 }
 
+void flush_mouse_devices(QWORD callback, QWORD original_callback, PDRIVER_OBJECT mouclass, PDRIVER_OBJECT mouhid)
+{
+	PDEVICE_OBJECT hid_device_object = mouhid->DeviceObject;
+	while (hid_device_object)
+	{
+		PDEVICE_OBJECT class_device_object = mouclass->DeviceObject;
+		while (class_device_object)
+		{
+			PULONG_PTR device_extension = (PULONG_PTR)hid_device_object->DeviceExtension;
+			ULONG_PTR device_ext_size =
+				((ULONG_PTR)hid_device_object->DeviceObjectExtension - (ULONG_PTR)hid_device_object->DeviceExtension) / 4;
+
+			for (ULONG_PTR i = 0; i < device_ext_size; i++)
+			{
+				if (device_extension[i] == original_callback)
+				{
+					device_extension[i] = callback;
+				}
+			}
+			class_device_object = class_device_object->NextDevice;
+		}
+		hid_device_object = hid_device_object->AttachedDevice;
+	}
+}
+
 void unhook_mouse_devices(QWORD callback, QWORD original_callback, PDRIVER_OBJECT mouclass, PDRIVER_OBJECT mouhid)
 {
 	PDEVICE_OBJECT hid_device_object = mouhid->DeviceObject;
@@ -556,11 +583,6 @@ BOOLEAN hooks::install(void)
 	//
 	// mouse hook
 	//
-	_KeAcquireSpinLockAtDpcLevel = (QWORD)KeAcquireSpinLockAtDpcLevel;
-	_KeReleaseSpinLockFromDpcLevel = (QWORD)KeReleaseSpinLockFromDpcLevel;
-	_IofCompleteRequest = (QWORD)IofCompleteRequest;
-	_IoReleaseRemoveLockEx = (QWORD)IoReleaseRemoveLockEx;
-
 	input::mouclass_routine = hook_mouse_devices((QWORD)input::MouseClassServiceCallbackHook, &input::mouclass, &input::mouhid);
 	if (input::mouclass_routine == 0)
 		return 0;
@@ -569,6 +591,9 @@ BOOLEAN hooks::install(void)
 
 	input::oMouseClassRead = input::mouclass->MajorFunction[IRP_MJ_READ];
 	input::mouclass->MajorFunction[IRP_MJ_READ] = input::MouseClassReadHook;
+
+	input::oMouseAddDevice = input::mouclass->DriverExtension->AddDevice;
+	input::mouclass->DriverExtension->AddDevice = input::MouseAddDeviceHook;
 
 
 	//
@@ -580,6 +605,7 @@ BOOLEAN hooks::install(void)
 	E0:
 		unhook_mouse_devices((QWORD)input::MouseClassServiceCallbackHook, input::mouclass_routine, input::mouclass, input::mouhid);
 		input::mouclass->MajorFunction[IRP_MJ_READ] = input::oMouseClassRead;
+		input::mouclass->DriverExtension->AddDevice = input::oMouseAddDevice;
 		return 0;
 	}
 
@@ -653,6 +679,7 @@ void hooks::uninstall(void)
 	unhook_mouse_devices((QWORD)input::MouseClassServiceCallbackHook, input::mouclass_routine, input::mouclass, input::mouhid);
 
 	input::mouclass->MajorFunction[IRP_MJ_READ] = input::oMouseClassRead;
+	input::mouclass->DriverExtension->AddDevice = input::oMouseAddDevice;
 
 	//
 	// uninstall exception hook
@@ -741,3 +768,4 @@ QWORD FindPattern(QWORD base, unsigned char* pattern, unsigned char* mask)
 	}
 	return 0;
 }
+
