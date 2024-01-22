@@ -273,7 +273,7 @@ void __fastcall hooks::exception::KdTrapHook(void)
 	}
 	*/
 
-
+	/*
 	QWORD thread  = __readgsqword(0x188);
 	QWORD process = *(QWORD*)(thread + 0xB8);
 	QWORD thread_process = *(QWORD*)(thread + 0x98 + 0x20);
@@ -287,7 +287,7 @@ void __fastcall hooks::exception::KdTrapHook(void)
 		PsGetProcessImageFileName(thread_process),
 		__readcr3(),
 		current_context->Rip
-		);
+		);*/
 
 	return oKdTrap();
 }
