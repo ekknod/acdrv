@@ -66,13 +66,16 @@ namespace hooks
 		PDRIVER_OBJECT mouclass;
 		PDRIVER_OBJECT mouhid;
 		QWORD          mouclass_routine;
-		BOOLEAN        input_sent;
-		BOOLEAN        flush;
 
+		MOUSE_INPUT_DATA  mouse_data;
+		PMOUSE_INPUT_DATA mouse_irp = 0;
+
+		NTSTATUS       (*rimInputApc)(void *a1, void *a2, void *a3, void *a4, void *a5);
 		NTSTATUS       (*oMouseClassRead)(PDEVICE_OBJECT device, PIRP irp);
 		NTSTATUS       (*oMouseAddDevice)(PDRIVER_OBJECT DriverObject, PDEVICE_OBJECT PhysicalDeviceObject);
 
 		QWORD          MouseClassServiceCallbackHook(PDEVICE_OBJECT DeviceObject, PMOUSE_INPUT_DATA InputDataStart, PMOUSE_INPUT_DATA InputDataEnd, PULONG InputDataConsumed);
+		NTSTATUS       MouseApc(void* a1, void* a2, void* a3, void* a4, void* a5);
 		NTSTATUS       MouseClassReadHook(PDEVICE_OBJECT device, PIRP irp);
 		NTSTATUS       MouseAddDeviceHook(IN PDRIVER_OBJECT DriverObject, IN PDEVICE_OBJECT PhysicalDeviceObject);
 	}
@@ -119,7 +122,12 @@ extern "C" NTSTATUS DriverEntry(
 
 	LOG("Running\n");
 
-	DriverObject->DriverUnload = DriverUnload;
+	//
+	// MouseClassRead hook requires adjustment because of IRP hook,
+	// do not allow unload 09.02.2024
+	// 
+	// DriverObject->DriverUnload = DriverUnload;
+	//
 	return STATUS_SUCCESS;
 }
 
@@ -186,11 +194,11 @@ QWORD hooks::input::MouseClassServiceCallbackHook(
 	//
 	if (return_address >= ntoskrnl.base && return_address <= (ntoskrnl.base + ntoskrnl.size))
 	{
-		input_sent = 1;
+		mouse_data = *InputDataStart;
 	}
 	else
 	{
-		input_sent = 0;
+		memset(&mouse_data, 0, sizeof(mouse_data));
 	}
 
 	return ((QWORD(*)(PDEVICE_OBJECT, PMOUSE_INPUT_DATA, PMOUSE_INPUT_DATA, PULONG))(mouclass_routine))(
@@ -204,31 +212,44 @@ QWORD hooks::input::MouseClassServiceCallbackHook(
 //
 // https:://github.com/everdox/hidinput
 //
+NTSTATUS hooks::input::MouseApc(void* a1, void* a2, void* a3, void* a4, void* a5)
+{
+
+	for (int i = sizeof(MOUSE_INPUT_DATA); i--;)
+	{
+		if (((unsigned char*)mouse_irp)[i] != ((unsigned char*)&mouse_data)[i])
+		{
+			DbgPrintEx(77, 0, "invalid mouse packet detected\n");
+			break;
+		}
+	}
+	return rimInputApc(a1, a2, a3, a4, a5);
+}
+
+//
+// https:://github.com/everdox/hidinput
+//
 NTSTATUS hooks::input::MouseClassReadHook(PDEVICE_OBJECT device, PIRP irp)
 {
-	NTSTATUS status = hooks::input::oMouseClassRead(device,irp);
-	if (status == 259)
+	QWORD *routine;
+	routine=(QWORD*)irp;
+	routine+=0xb;
+
+	if (rimInputApc == 0)
 	{
-		//
-		// did MouseClassServiceCallback get called?
-		// only works for real systems. vmware is not supported.
-		// 
-		if (input_sent == 0 && input::vmusbmouse.base == 0)
-		{
-			if (!flush)
-				LOG("manual mouse input call detected\n");
-			else
-				flush = 0;
-		}
-		input_sent = 0;
+		*(QWORD*)&rimInputApc = *routine;
 	}
-	return status;
+
+	*routine=(ULONGLONG)MouseApc;
+
+	mouse_irp = (struct _MOUSE_INPUT_DATA*)irp->UserBuffer;
+
+	return hooks::input::oMouseClassRead(device,irp);
 }
 
 void update_mouse_devices(QWORD callback, QWORD original_callback, PDRIVER_OBJECT mouclass, PDRIVER_OBJECT mouhid);
 NTSTATUS hooks::input::MouseAddDeviceHook(IN PDRIVER_OBJECT DriverObject, IN PDEVICE_OBJECT PhysicalDeviceObject)
 {
-	flush = 1;
 	NTSTATUS status = oMouseAddDevice(DriverObject, PhysicalDeviceObject);
 	if (status == 0)
 	{
