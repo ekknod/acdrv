@@ -9,6 +9,7 @@
 // - exception hook
 // - mouse hook
 // - syscall hook (https://github.com/everdox/InfinityHook)
+// - SwapContext hook
 // tested Win11 22H3 + Win10 22H2 HVCI/Core Isolation enabled
 //
 
