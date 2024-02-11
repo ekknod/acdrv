@@ -2,18 +2,17 @@
 #include <ntddmou.h>
 #include <kbdmou.h>
 #include <intrin.h>
+#include "img.h"
+
 //
-// detecting MouseClassServiceCallback manipulation
-// 
-// e.g.
-// https://github.com/nbqofficial/norsefire
-// https://github.com/ekknod/MouseClassServiceCallbackTrick
-// https://github.com/ekknod/MouseClassServiceCallbackMeme
-//
-// legal chain should be something like this:
-// HidpDistributeInterruptReport->IofCompleteRequest->IopfCompleteRequest->MouHid_ReadComplete->MouseClassServiceCallback->MouseClassRead->win32k.sys:rimInputApc
+// features:
+// - exception hook
+// - mouse hook
+// - syscall hook (https://github.com/everdox/InfinityHook)
+// tested Win11 22H3 + Win10 22H2 HVCI/Core Isolation enabled
 //
 
+#define POOLTAG (DWORD)'ACEC'
 
 #define HVCI 1
 
@@ -30,6 +29,7 @@ typedef struct
 } MODULE_INFO ;
 
 MODULE_INFO ntoskrnl;
+MODULE_INFO vmusbmouse;
 
 MODULE_INFO get_module_info(PWCH module_name);
 void NtSleep(DWORD milliseconds)
@@ -51,33 +51,35 @@ namespace hooks
 
 	namespace efi
 	{
-		QWORD HalEfiRuntimeServicesBlock;
-
 		QWORD (*oGetVariable)(char16_t *VariableName, GUID* VendorGuid, DWORD* Attributes, QWORD* DataSize, VOID* Data);
 		QWORD (*oSetVariable)(char16_t *VariableName, GUID* VendorGuid, DWORD Attributes, QWORD DataSize, VOID* Data);
+	}
 
-		QWORD GetVariableHook(char16_t *VariableName, GUID* VendorGuid, DWORD* Attributes, QWORD* DataSize, VOID* Data);
-		QWORD SetVariableHook(char16_t *VariableName, GUID* VendorGuid, DWORD Attributes, QWORD DataSize, VOID* Data);
+	namespace syscall
+	{
+		QWORD SystemCallEntryPage;
+		void __fastcall SyscallStub(unsigned int SyscallIndex, void **SyscallFunction);
+		QWORD (*oKeQueryPerformanceCounter)(QWORD rcx);
+		QWORD KeQueryPerformanceCounterHook(QWORD rcx);
 	}
 	
 	namespace input
 	{
-		MODULE_INFO    vmusbmouse;
-		PDRIVER_OBJECT mouclass;
-		PDRIVER_OBJECT mouhid;
-		QWORD          mouclass_routine;
+		PDRIVER_OBJECT    mouclass;
+		PDRIVER_OBJECT    mouhid;
+		QWORD             mouclass_routine;
 
 		MOUSE_INPUT_DATA  mouse_data;
 		PMOUSE_INPUT_DATA mouse_irp = 0;
 
-		NTSTATUS       (*rimInputApc)(void *a1, void *a2, void *a3, void *a4, void *a5);
-		NTSTATUS       (*oMouseClassRead)(PDEVICE_OBJECT device, PIRP irp);
-		NTSTATUS       (*oMouseAddDevice)(PDRIVER_OBJECT DriverObject, PDEVICE_OBJECT PhysicalDeviceObject);
+		NTSTATUS          (*rimInputApc)(void *a1, void *a2, void *a3, void *a4, void *a5);
+		NTSTATUS          (*oMouseClassRead)(PDEVICE_OBJECT device, PIRP irp);
+		NTSTATUS          (*oMouseAddDevice)(PDRIVER_OBJECT DriverObject, PDEVICE_OBJECT PhysicalDeviceObject);
 
-		QWORD          MouseClassServiceCallbackHook(PDEVICE_OBJECT DeviceObject, PMOUSE_INPUT_DATA InputDataStart, PMOUSE_INPUT_DATA InputDataEnd, PULONG InputDataConsumed);
-		NTSTATUS       MouseApc(void* a1, void* a2, void* a3, void* a4, void* a5);
-		NTSTATUS       MouseClassReadHook(PDEVICE_OBJECT device, PIRP irp);
-		NTSTATUS       MouseAddDeviceHook(IN PDRIVER_OBJECT DriverObject, IN PDEVICE_OBJECT PhysicalDeviceObject);
+		QWORD             MouseClassServiceCallbackHook(PDEVICE_OBJECT DeviceObject, PMOUSE_INPUT_DATA InputDataStart, PMOUSE_INPUT_DATA InputDataEnd, PULONG InputDataConsumed);
+		NTSTATUS          MouseApc(void* a1, void* a2, void* a3, void* a4, void* a5);
+		NTSTATUS          MouseClassReadHook(PDEVICE_OBJECT device, PIRP irp);
+		NTSTATUS          MouseAddDeviceHook(IN PDRIVER_OBJECT DriverObject, IN PDEVICE_OBJECT PhysicalDeviceObject);
 	}
 	
 	namespace exception
@@ -94,6 +96,16 @@ namespace hooks
 		UCHAR HalClearLastBranchRecordStackHook();
 	}
 }
+
+enum class TRACE_OPERATION
+{
+	TRACE_START,
+	TRACE_SYSCALL,
+	TRACE_END
+};
+NTSTATUS ApplyTraceSettings(_In_ TRACE_OPERATION Operation);
+QWORD FindPattern(QWORD base, unsigned char* pattern, unsigned char* mask);
+
 
 extern "C" VOID DriverUnload(
 	_In_ struct _DRIVER_OBJECT* DriverObject
@@ -112,8 +124,10 @@ extern "C" NTSTATUS DriverEntry(
 )
 {
 	UNREFERENCED_PARAMETER(RegistryPath);
+	UNREFERENCED_PARAMETER(DriverObject);
 		
 	ntoskrnl = get_module_info(L"ntoskrnl.exe");
+	vmusbmouse = get_module_info(L"vmusbmouse.sys");
 	if (!hooks::install())
 	{
 		LOG("failed to install hooks\n");
@@ -123,40 +137,152 @@ extern "C" NTSTATUS DriverEntry(
 	LOG("Running\n");
 
 	//
-	// MouseClassRead hook requires adjustment because of IRP hook,
-	// do not allow unload 09.02.2024
-	// 
-	// DriverObject->DriverUnload = DriverUnload;
+	// allow driver unload only with vmware
 	//
+	if (vmusbmouse.base != 0)
+	{
+		DriverObject->DriverUnload = DriverUnload;
+	}
 	return STATUS_SUCCESS;
 }
 
-QWORD hooks::efi::GetVariableHook(char16_t *VariableName, GUID* VendorGuid, DWORD* Attributes, QWORD* DataSize, VOID* Data)
+NTSTATUS DetourNtCreateFile(
+	_Out_ PHANDLE FileHandle,
+	_In_ ACCESS_MASK DesiredAccess,
+	_In_ POBJECT_ATTRIBUTES ObjectAttributes,
+	_Out_ PIO_STATUS_BLOCK IoStatusBlock,
+	_In_opt_ PLARGE_INTEGER AllocationSize,
+	_In_ ULONG FileAttributes,
+	_In_ ULONG ShareAccess,
+	_In_ ULONG CreateDisposition,
+	_In_ ULONG CreateOptions,
+	_In_reads_bytes_opt_(EaLength) PVOID EaBuffer,
+	_In_ ULONG EaLength)
 {
-	DbgPrintEx(77, 0, "[%ld] EFI->GetVariable: %ws\n", PsGetCurrentProcessId(), VariableName);
+	//
+	// We're going to filter for our "magic" file name.
+	//
+	if (ObjectAttributes &&
+		ObjectAttributes->ObjectName && 
+		ObjectAttributes->ObjectName->Buffer)
+	{
+		//
+		// Unicode strings aren't guaranteed to be NULL terminated so
+		// we allocate a copy that is.
+		//
+		PWCHAR ObjectName = (PWCHAR)ExAllocatePool2(POOL_FLAG_NON_PAGED, ObjectAttributes->ObjectName->Length + sizeof(wchar_t), POOLTAG);
+		if (ObjectName)
+		{
+			memset(ObjectName, 0, ObjectAttributes->ObjectName->Length + sizeof(wchar_t));
+			memcpy(ObjectName, ObjectAttributes->ObjectName->Buffer, ObjectAttributes->ObjectName->Length);
+		
+			//
+			// Does it contain our special file name?
+			//
+			if (wcsstr(ObjectName, L"ifh--"))
+			{
+				LOG("Denying access to file: %wZ.\n", ObjectAttributes->ObjectName);
 
+				ExFreePoolWithTag(ObjectName, POOLTAG);
+
+				//
+				// The demo denies access to said file.
+				//
+				return STATUS_ACCESS_DENIED;
+			}
+
+			ExFreePoolWithTag(ObjectName, POOLTAG);
+		}
+	}
 
 	//
-	// QWORD status = cpu::emulator(oGetVariable, VariableName, VendorGuid, Attributes, DataSize, Data);
+	// We're uninterested, call the original.
 	//
-
-	QWORD status = oGetVariable(VariableName, VendorGuid, Attributes, DataSize, Data);
-
-	return status;
+	return NtCreateFile(FileHandle, DesiredAccess, ObjectAttributes, IoStatusBlock, AllocationSize, FileAttributes, ShareAccess, CreateDisposition, CreateOptions, EaBuffer, EaLength);
 }
 
-QWORD hooks::efi::SetVariableHook(char16_t *VariableName, GUID* VendorGuid, DWORD Attributes, QWORD DataSize, VOID* Data)
+void __fastcall hooks::syscall::SyscallStub(unsigned int SyscallIndex, void **SyscallFunction)
 {
-	DbgPrintEx(77, 0, "[%ld] EFI->SetVariable: %ws\n", PsGetCurrentProcessId(), VariableName);
+	UNREFERENCED_PARAMETER(SyscallIndex);
+	UNREFERENCED_PARAMETER(SyscallFunction);
 
+	if (*SyscallFunction == (void*)NtCreateFile)
+	{
+		*SyscallFunction = DetourNtCreateFile;
+	}
 
 	//
-	// QWORD status = cpu::emulator(oSetVariable, VariableName, VendorGuid, Attributes, DataSize, Data);
+	// to-do / would like to try at some point -->:
 	//
+	// if (*SyscallFunction == (void*)NtQuerySystemEnvironmentValueEx)
+	//	*SyscallFunction = DetourNtQuerySystemEnvironmentValueEx;
+	// 
+	// DetourNtQuerySystemEnvironmentValueEx:
+	//	$status = cpu::emulator(efi::oGetVariable, VariableName, VendorGuid, Attributes, DataSize, Data);
+	//
+}
 
-	QWORD status = oSetVariable(VariableName, VendorGuid, Attributes, DataSize, Data);
+QWORD hooks::syscall::KeQueryPerformanceCounterHook(QWORD rcx)
+{
+	if (ExGetPreviousMode() == KernelMode)
+	{
+		return oKeQueryPerformanceCounter(rcx);
+	}
 
-	return status;
+	QWORD current_thread = (QWORD)PsGetCurrentThread();
+	DWORD syscall_index = *(DWORD*)(current_thread + 0x80);
+	if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+	{
+		return oKeQueryPerformanceCounter(rcx);
+	}
+
+	PVOID* StackMax = (PVOID*)__readgsqword(0x1A8);
+	PVOID* StackFrame = (PVOID*)_AddressOfReturnAddress();
+	for (PVOID* StackCurrent = StackMax;
+		StackCurrent > StackFrame;
+		--StackCurrent)
+	{
+		PULONG AsUlong = (PULONG)StackCurrent;
+		if (*AsUlong != ((ULONG)0x501802))
+		{
+			continue;
+		}
+		// 
+		// If the first magic is set, check for the second magic.
+		//
+		--StackCurrent;
+		PUSHORT AsShort = (PUSHORT)StackCurrent;
+		if (*AsShort != ((USHORT)0xF33))
+		{
+			continue;
+		}
+
+		//
+		// Now we reverse the direction of the stack walk.
+		//
+		int index = 0;
+		for (;
+			StackCurrent < StackMax;
+			++StackCurrent)
+		{
+			PULONGLONG AsUlonglong = (PULONGLONG)StackCurrent;
+			index++;
+			if (index > 8)
+			{
+				break;
+			}
+			if (!(PAGE_ALIGN(*AsUlonglong) >= (PVOID)syscall::SystemCallEntryPage &&
+				PAGE_ALIGN(*AsUlonglong) < (PVOID)((uintptr_t)syscall::SystemCallEntryPage + (PAGE_SIZE * 2))))
+			{
+				continue;
+			}
+			void** syscall = &StackCurrent[9];
+			SyscallStub(syscall_index, syscall);
+			break;
+		}
+		break;
+	}
+	return oKeQueryPerformanceCounter(rcx);
 }
 
 QWORD hooks::input::MouseClassServiceCallbackHook(
@@ -200,7 +326,9 @@ QWORD hooks::input::MouseClassServiceCallbackHook(
 	{
 		memset(&mouse_data, 0, sizeof(mouse_data));
 	}
-
+	//
+	// HidpDistributeInterruptReport->IofCompleteRequest->IopfCompleteRequest->MouHid_ReadComplete->MouseClassServiceCallback->MouseClassRead->win32k.sys:rimInputApc
+	//
 	return ((QWORD(*)(PDEVICE_OBJECT, PMOUSE_INPUT_DATA, PMOUSE_INPUT_DATA, PULONG))(mouclass_routine))(
 		DeviceObject,
 		InputDataStart,
@@ -214,7 +342,6 @@ QWORD hooks::input::MouseClassServiceCallbackHook(
 //
 NTSTATUS hooks::input::MouseApc(void* a1, void* a2, void* a3, void* a4, void* a5)
 {
-
 	for (int i = sizeof(MOUSE_INPUT_DATA); i--;)
 	{
 		if (((unsigned char*)mouse_irp)[i] != ((unsigned char*)&mouse_data)[i])
@@ -231,19 +358,21 @@ NTSTATUS hooks::input::MouseApc(void* a1, void* a2, void* a3, void* a4, void* a5
 //
 NTSTATUS hooks::input::MouseClassReadHook(PDEVICE_OBJECT device, PIRP irp)
 {
-	QWORD *routine;
-	routine=(QWORD*)irp;
-	routine+=0xb;
-
-	if (rimInputApc == 0)
+	//
+	// do not allow mouse hook with vmware
+	//
+	if (vmusbmouse.base == 0)
 	{
-		*(QWORD*)&rimInputApc = *routine;
+		QWORD *routine;
+		routine=(QWORD*)irp;
+		routine+=0xb;
+		if (rimInputApc == 0)
+		{
+			*(QWORD*)&rimInputApc = *routine;
+		}
+		*routine=(ULONGLONG)MouseApc;
+		mouse_irp = (struct _MOUSE_INPUT_DATA*)irp->UserBuffer;
 	}
-
-	*routine=(ULONGLONG)MouseApc;
-
-	mouse_irp = (struct _MOUSE_INPUT_DATA*)irp->UserBuffer;
-
 	return hooks::input::oMouseClassRead(device,irp);
 }
 
@@ -258,10 +387,6 @@ NTSTATUS hooks::input::MouseAddDeviceHook(IN PDRIVER_OBJECT DriverObject, IN PDE
 	return status;
 }
 
-//
-// 24.09.2023 : added this as researching purposes. decided to keep it, since its fine code.
-// maybe we can find some use for it later :P
-//
 extern "C" __declspec(dllimport) PCSTR PsGetProcessImageFileName(QWORD process);
 void __fastcall hooks::exception::KdTrapHook(void)
 {
@@ -557,10 +682,48 @@ void update_mouse_devices(QWORD current_callback, QWORD callback, PDRIVER_OBJECT
 
 extern "C" NTSYSCALLAPI NTSTATUS HalPrivateDispatchTable(void);
 extern "C" NTSYSCALLAPI NTSTATUS HalEnumerateEnvironmentVariablesEx(void);
-QWORD FindPattern(QWORD base, unsigned char* pattern, unsigned char* mask);
+
+extern "C" NTSYSCALLAPI NTSTATUS 
+ZwSetSystemInformation (
+    ULONG SystemInformationClass, 
+    PVOID SystemInformation, 
+    ULONG SystemInformationLength);
+
+extern "C" NTSYSCALLAPI NTSTATUS
+ZwQuerySystemInformation(
+    ULONG                    SystemInformationClass,
+    PVOID                    SystemInformation,
+    ULONG                    SystemInformationLength,
+    PULONG                   ReturnLength
+);
 
 BOOLEAN hooks::install(void)
 {
+	//
+	// syscall hook
+	//
+	if (!NT_SUCCESS(ApplyTraceSettings(TRACE_OPERATION::TRACE_SYSCALL)))
+	{
+		if (!NT_SUCCESS(ApplyTraceSettings(TRACE_OPERATION::TRACE_START)))
+		{
+			return 0;
+		}
+		ApplyTraceSettings(TRACE_OPERATION::TRACE_SYSCALL);
+	}
+
+
+	QWORD temp = (QWORD)KeQueryPerformanceCounter + 0x05;
+	while (*(WORD*)temp != 0x8948) temp++;
+	temp = temp + 0x08;
+	temp = (temp + 7) + *(int*)(temp + 3);
+	temp = *(QWORD*)temp;
+
+
+	*(QWORD*)&syscall::oKeQueryPerformanceCounter = *(QWORD*)(temp + 0x70);
+	*(QWORD*)(temp + 0x70) = (QWORD)syscall::KeQueryPerformanceCounterHook;
+	syscall::SystemCallEntryPage = (QWORD)ImgGetSyscallEntry((PVOID)ntoskrnl.base);
+
+
 	//
 	// mouse hook
 	//
@@ -570,7 +733,7 @@ BOOLEAN hooks::install(void)
 
 	update_mouse_devices(input::mouclass_routine, (QWORD)input::MouseClassServiceCallbackHook, input::mouclass, input::mouhid);
 
-	input::vmusbmouse = get_module_info(L"vmusbmouse.sys");
+	
 	input::oMouseClassRead = input::mouclass->MajorFunction[IRP_MJ_READ];
 	input::mouclass->MajorFunction[IRP_MJ_READ] = input::MouseClassReadHook;
 
@@ -628,29 +791,20 @@ BOOLEAN hooks::install(void)
 	*(BYTE*)(KiCpuTracingFlags) = 2;
 
 
+	QWORD HalEfiRuntimeServicesBlock = (QWORD)HalEnumerateEnvironmentVariablesEx + 0xC;
 
-	//
-	// rt hook
-	//
-#ifndef HVCI
-	efi::HalEfiRuntimeServicesBlock = (QWORD)HalEnumerateEnvironmentVariablesEx + 0xC;
+	HalEfiRuntimeServicesBlock =
+		*(INT*)(HalEfiRuntimeServicesBlock + 1) + HalEfiRuntimeServicesBlock + 5;
 
-	efi::HalEfiRuntimeServicesBlock =
-		*(INT*)(efi::HalEfiRuntimeServicesBlock + 1) + efi::HalEfiRuntimeServicesBlock + 5;
+	HalEfiRuntimeServicesBlock = HalEfiRuntimeServicesBlock + 0x69;
 
-	efi::HalEfiRuntimeServicesBlock = efi::HalEfiRuntimeServicesBlock + 0x69;
+	HalEfiRuntimeServicesBlock =
+		*(INT*)(HalEfiRuntimeServicesBlock + 3) + HalEfiRuntimeServicesBlock + 7;
 
-	efi::HalEfiRuntimeServicesBlock =
-		*(INT*)(efi::HalEfiRuntimeServicesBlock + 3) + efi::HalEfiRuntimeServicesBlock + 7;
+	HalEfiRuntimeServicesBlock = *(QWORD*)(HalEfiRuntimeServicesBlock);
 
-	efi::HalEfiRuntimeServicesBlock = *(QWORD*)(efi::HalEfiRuntimeServicesBlock);
-
-	*(QWORD*)&efi::oGetVariable = *(QWORD*)(efi::HalEfiRuntimeServicesBlock + 0x18);
-	*(QWORD*)&efi::oSetVariable = *(QWORD*)(efi::HalEfiRuntimeServicesBlock + 0x28);
-
-	*(QWORD*)(efi::HalEfiRuntimeServicesBlock + 0x18) = (QWORD)efi::GetVariableHook;
-	*(QWORD*)(efi::HalEfiRuntimeServicesBlock + 0x28) = (QWORD)efi::SetVariableHook;
-#endif
+	*(QWORD*)&efi::oGetVariable = *(QWORD*)(HalEfiRuntimeServicesBlock + 0x18);
+	*(QWORD*)&efi::oSetVariable = *(QWORD*)(HalEfiRuntimeServicesBlock + 0x28);
 
 	return 1;
 }
@@ -658,7 +812,19 @@ BOOLEAN hooks::install(void)
 void hooks::uninstall(void)
 {
 	//
-	// uninstall mouse input hook
+	// unhook syscalls
+	//
+	ApplyTraceSettings(TRACE_OPERATION::TRACE_END);
+	QWORD temp = (QWORD)KeQueryPerformanceCounter + 0x05;
+	while (*(WORD*)temp != 0x8948) temp++;
+	temp = temp + 0x08;
+	temp = (temp + 7) + *(int*)(temp + 3);
+	temp = *(QWORD*)temp;
+	*(QWORD*)(temp + 0x70) = (QWORD)syscall::oKeQueryPerformanceCounter;
+
+
+	//
+	// unhook mouse
 	//
 	update_mouse_devices((QWORD)input::MouseClassServiceCallbackHook, input::mouclass_routine, input::mouclass, input::mouhid);
 
@@ -666,7 +832,7 @@ void hooks::uninstall(void)
 	input::mouclass->DriverExtension->AddDevice = input::oMouseAddDevice;
 
 	//
-	// uninstall exception hook
+	// unhook exceptions
 	//
 	*(QWORD*)((QWORD)HalPrivateDispatchTable + 0x328) = (QWORD)exception::oKdTrap;
 	*(DWORD*)(exception::KdpDebugRoutineSelect) = 0;
@@ -674,7 +840,7 @@ void hooks::uninstall(void)
 
 
 	//
-	// uninstall swap context hook
+	// unhook SwapContext
 	//
 	*(QWORD*)((QWORD)HalPrivateDispatchTable + 0x400) = *(QWORD*)&swap_ctx::oHalClearLastBranchRecordStack;
 
@@ -689,14 +855,6 @@ void hooks::uninstall(void)
 	while (*(unsigned short*)KiCpuTracingFlags != 0x05F7) KiCpuTracingFlags++;
 	KiCpuTracingFlags = (KiCpuTracingFlags + 10) + *(int*)(KiCpuTracingFlags + 2);
 	*(BYTE*)(KiCpuTracingFlags) = 0;
-
-	//
-	// rt unhook
-	//
-#ifndef HVCI
-	*(QWORD*)(efi::HalEfiRuntimeServicesBlock + 0x18) = (QWORD)efi::oGetVariable;
-	*(QWORD*)(efi::HalEfiRuntimeServicesBlock + 0x28) = (QWORD)efi::oSetVariable;
-#endif
 }
 
 static int CheckMask(unsigned char* base, unsigned char* pattern, unsigned char* mask)
@@ -753,5 +911,136 @@ QWORD FindPattern(QWORD base, unsigned char* pattern, unsigned char* mask)
 		}
 	}
 	return 0;
+}
+
+EXTERN_C
+NTSYSCALLAPI 
+NTSTATUS
+NTAPI
+ZwTraceControl (
+	_In_ ULONG FunctionCode,
+	_In_reads_bytes_opt_(InBufferLen) PVOID InBuffer,
+	_In_ ULONG InBufferLen,
+	 _Out_writes_bytes_opt_(OutBufferLen) PVOID OutBuffer,
+	_In_ ULONG OutBufferLen,
+	_Out_ PULONG ReturnLength
+);
+#define EVENT_TRACE_BUFFERING_MODE  0x00000400  // Buffering mode only
+#define EtwpStartTrace		    1
+#define EtwpStopTrace		    2
+#define EtwpQueryTrace		    3
+#define EtwpUpdateTrace		    4
+#define EtwpFlushTrace		    5
+#define EVENT_TRACE_FLAG_SYSTEMCALL 0x00000080  // system calls
+#define WNODE_FLAG_TRACED_GUID      0x00020000  // denotes a trace
+
+#pragma warning (disable: 4201)
+typedef struct _WNODE_HEADER
+{
+	ULONG BufferSize;        // Size of entire buffer inclusive of this ULONG
+	ULONG ProviderId;    // Provider Id of driver returning this buffer
+	union
+	{
+		ULONG64 HistoricalContext;  // Logger use
+		struct
+		{
+			ULONG Version;           // Reserved
+			ULONG Linkage;           // Linkage field reserved for WMI
+		} DUMMYSTRUCTNAME;
+	} DUMMYUNIONNAME;
+
+	union
+	{
+		ULONG CountLost;         // Reserved
+		HANDLE KernelHandle;     // Kernel handle for data block
+		LARGE_INTEGER TimeStamp; // Timestamp as returned in units of 100ns
+								 // since 1/1/1601
+	} DUMMYUNIONNAME2;
+	GUID Guid;                  // Guid for data block returned with results
+	ULONG ClientContext;
+	ULONG Flags;             // Flags, see below
+} WNODE_HEADER, *PWNODE_HEADER;
+
+typedef struct _EVENT_TRACE_PROPERTIES {
+	WNODE_HEADER	Wnode;
+	ULONG			BufferSize;
+	ULONG			MinimumBuffers;
+	ULONG			MaximumBuffers;
+	ULONG			MaximumFileSize;
+	ULONG			LogFileMode;
+	ULONG			FlushTimer;
+	ULONG			EnableFlags;
+	LONG			AgeLimit;
+	ULONG			NumberOfBuffers;
+	ULONG			FreeBuffers;
+	ULONG			EventsLost;
+	ULONG			BuffersWritten;
+	ULONG			LogBuffersLost;
+	ULONG			RealTimeBuffersLost;
+	HANDLE			LoggerThreadId;
+	ULONG			LogFileNameOffset;
+	ULONG			LoggerNameOffset;
+} EVENT_TRACE_PROPERTIES, *PEVENT_TRACE_PROPERTIES;
+
+typedef struct _CKCL_TRACE_PROPERIES: EVENT_TRACE_PROPERTIES
+{
+	ULONG64				Unknown[3];
+	UNICODE_STRING			ProviderName;
+} CKCL_TRACE_PROPERTIES, *PCKCL_TRACE_PROPERTIES;
+
+const GUID session_guid = { 0x9E814AAD, 0x3204, 0x11D2, { 0x9A, 0x82, 0x0, 0x60, 0x8, 0xA8, 0x69, 0x39 }  };
+
+//
+// https://github.com/everdox/InfinityHook / https://revers.engineering/fun-with-pg-compliant-hook/
+//
+NTSTATUS ApplyTraceSettings(_In_ TRACE_OPERATION Operation)
+{
+	PCKCL_TRACE_PROPERTIES Property = (PCKCL_TRACE_PROPERTIES)ExAllocatePool2(POOL_FLAG_NON_PAGED, PAGE_SIZE, POOLTAG);
+	if (!Property)
+	{
+		return STATUS_MEMORY_NOT_ALLOCATED;
+	}
+
+	memset(Property, 0, PAGE_SIZE);
+
+	Property->Wnode.BufferSize = PAGE_SIZE;
+	Property->Wnode.Flags = WNODE_FLAG_TRACED_GUID;
+	Property->ProviderName = RTL_CONSTANT_STRING(L"NT Kernel Logger");
+	Property->Wnode.Guid = session_guid;
+	Property->Wnode.ClientContext = 1;
+	Property->BufferSize = sizeof(ULONG);
+	Property->MinimumBuffers = Property->MaximumBuffers = 2;
+	Property->LogFileMode = EVENT_TRACE_BUFFERING_MODE;
+
+	NTSTATUS Status = STATUS_ACCESS_DENIED;
+	ULONG ReturnLength = 0;
+
+	switch (Operation)
+	{
+		case TRACE_OPERATION::TRACE_START:
+		{
+			Status = ZwTraceControl(EtwpStartTrace, Property, PAGE_SIZE, Property, PAGE_SIZE, &ReturnLength);
+			break;
+		}
+		case TRACE_OPERATION::TRACE_END:
+		{
+			Status = ZwTraceControl(EtwpStopTrace, Property, PAGE_SIZE, Property, PAGE_SIZE, &ReturnLength);
+			break;
+		}
+		case TRACE_OPERATION::TRACE_SYSCALL:
+		{
+			//
+			// Add more flags here to trap on more events!
+			//
+			Property->EnableFlags = EVENT_TRACE_FLAG_SYSTEMCALL;
+
+			Status = ZwTraceControl(EtwpUpdateTrace, Property, PAGE_SIZE, Property, PAGE_SIZE, &ReturnLength);
+			break;
+		}
+	}
+
+	ExFreePoolWithTag(Property, POOLTAG);
+
+	return Status;
 }
 
