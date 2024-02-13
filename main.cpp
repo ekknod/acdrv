@@ -15,8 +15,6 @@
 
 #define POOLTAG (DWORD)'ACEC'
 
-#define HVCI 1
-
 typedef ULONG_PTR QWORD;
 typedef unsigned __int32 DWORD;
 typedef unsigned __int16 WORD;
@@ -26,11 +24,8 @@ typedef unsigned __int8 BYTE;
 
 typedef struct
 {
-	QWORD base,size;
-} MODULE_INFO ;
-
-MODULE_INFO ntoskrnl;
-MODULE_INFO vmusbmouse;
+	QWORD base, size;
+} MODULE_INFO;
 
 MODULE_INFO get_module_info(PWCH module_name);
 void NtSleep(DWORD milliseconds)
@@ -45,6 +40,12 @@ void NtSleep(DWORD milliseconds)
 #endif
 }
 
+namespace globals
+{
+	MODULE_INFO ntoskrnl;
+	MODULE_INFO vmusbmouse;
+}
+
 namespace hooks
 {
 	BOOLEAN install(void);
@@ -52,18 +53,37 @@ namespace hooks
 
 	namespace efi
 	{
-		QWORD (*oGetVariable)(char16_t *VariableName, GUID* VendorGuid, DWORD* Attributes, QWORD* DataSize, VOID* Data);
-		QWORD (*oSetVariable)(char16_t *VariableName, GUID* VendorGuid, DWORD Attributes, QWORD DataSize, VOID* Data);
+		QWORD(*oGetVariable)(PCWCH VariableName, GUID* VendorGuid, DWORD* Attributes, QWORD* DataSize, VOID* Data);
+		QWORD(*oSetVariable)(PCWCH VariableName, GUID* VendorGuid, DWORD Attributes, QWORD DataSize, VOID* Data);
+
+		QWORD NtSetSystemEnvironmentValueEx;
+		QWORD NtQuerySystemEnvironmentValueEx;
+
+		NTSTATUS NTAPI NtQuerySystemEnvironmentValueExHook(
+			PUNICODE_STRING VariableName,
+			LPGUID VendorGuid,
+			PVOID Value,
+			PULONG ValueLength,
+			PULONG Attributes
+		);
+
+		NTSTATUS NTAPI NtSetSystemEnvironmentValueExHook(
+			PUNICODE_STRING VariableName,
+			LPGUID VendorGuid,
+			PVOID Value,
+			ULONG ValueLength,
+			ULONG Attributes
+		);
 	}
 
 	namespace syscall
 	{
 		QWORD SystemCallEntryPage;
-		void __fastcall SyscallStub(unsigned int SyscallIndex, void **SyscallFunction);
-		QWORD (*oKeQueryPerformanceCounter)(QWORD rcx);
+		void __fastcall SyscallStub(unsigned int SyscallIndex, void** SyscallFunction);
+		QWORD(*oKeQueryPerformanceCounter)(QWORD rcx);
 		QWORD KeQueryPerformanceCounterHook(QWORD rcx);
 	}
-	
+
 	namespace input
 	{
 		PDRIVER_OBJECT    mouclass;
@@ -71,9 +91,9 @@ namespace hooks
 		QWORD             mouclass_routine;
 
 		MOUSE_INPUT_DATA  mouse_data;
-		PMOUSE_INPUT_DATA mouse_irp = 0;
+		PMOUSE_INPUT_DATA mouse_irp;
 
-		NTSTATUS          (*rimInputApc)(void *a1, void *a2, void *a3, void *a4, void *a5);
+		NTSTATUS          (*rimInputApc)(void* a1, void* a2, void* a3, void* a4, void* a5);
 		NTSTATUS          (*oMouseClassRead)(PDEVICE_OBJECT device, PIRP irp);
 		NTSTATUS          (*oMouseAddDevice)(PDRIVER_OBJECT DriverObject, PDEVICE_OBJECT PhysicalDeviceObject);
 
@@ -82,7 +102,7 @@ namespace hooks
 		NTSTATUS          MouseClassReadHook(PDEVICE_OBJECT device, PIRP irp);
 		NTSTATUS          MouseAddDeviceHook(IN PDRIVER_OBJECT DriverObject, IN PDEVICE_OBJECT PhysicalDeviceObject);
 	}
-	
+
 	namespace exception
 	{
 		QWORD KdpDebugRoutineSelect;
@@ -93,7 +113,7 @@ namespace hooks
 
 	namespace swap_ctx
 	{
-		UCHAR (*oHalClearLastBranchRecordStack)(void);
+		UCHAR(*oHalClearLastBranchRecordStack)(void);
 		UCHAR HalClearLastBranchRecordStackHook();
 	}
 }
@@ -126,9 +146,9 @@ extern "C" NTSTATUS DriverEntry(
 {
 	UNREFERENCED_PARAMETER(RegistryPath);
 	UNREFERENCED_PARAMETER(DriverObject);
-		
-	ntoskrnl = get_module_info(L"ntoskrnl.exe");
-	vmusbmouse = get_module_info(L"vmusbmouse.sys");
+
+	globals::ntoskrnl = get_module_info(L"ntoskrnl.exe");
+	globals::vmusbmouse = get_module_info(L"vmusbmouse.sys");
 	if (!hooks::install())
 	{
 		LOG("failed to install hooks\n");
@@ -140,87 +160,79 @@ extern "C" NTSTATUS DriverEntry(
 	//
 	// allow driver unload only with vmware
 	//
-	if (vmusbmouse.base != 0)
+	if (globals::vmusbmouse.base != 0)
 	{
 		DriverObject->DriverUnload = DriverUnload;
 	}
 	return STATUS_SUCCESS;
 }
 
-NTSTATUS DetourNtCreateFile(
-	_Out_ PHANDLE FileHandle,
-	_In_ ACCESS_MASK DesiredAccess,
-	_In_ POBJECT_ATTRIBUTES ObjectAttributes,
-	_Out_ PIO_STATUS_BLOCK IoStatusBlock,
-	_In_opt_ PLARGE_INTEGER AllocationSize,
-	_In_ ULONG FileAttributes,
-	_In_ ULONG ShareAccess,
-	_In_ ULONG CreateDisposition,
-	_In_ ULONG CreateOptions,
-	_In_reads_bytes_opt_(EaLength) PVOID EaBuffer,
-	_In_ ULONG EaLength)
+NTSTATUS NTAPI hooks::efi::NtQuerySystemEnvironmentValueExHook(
+	PUNICODE_STRING VariableName,
+	LPGUID VendorGuid,
+	PVOID Value,
+	PULONG ValueLength,
+	PULONG Attributes
+)
 {
-	//
-	// We're going to filter for our "magic" file name.
-	//
-	if (ObjectAttributes &&
-		ObjectAttributes->ObjectName && 
-		ObjectAttributes->ObjectName->Buffer)
+	if (VariableName == 0 || VendorGuid == 0)
 	{
-		//
-		// Unicode strings aren't guaranteed to be NULL terminated so
-		// we allocate a copy that is.
-		//
-		PWCHAR ObjectName = (PWCHAR)ExAllocatePool2(POOL_FLAG_NON_PAGED, ObjectAttributes->ObjectName->Length + sizeof(wchar_t), POOLTAG);
-		if (ObjectName)
-		{
-			memset(ObjectName, 0, ObjectAttributes->ObjectName->Length + sizeof(wchar_t));
-			memcpy(ObjectName, ObjectAttributes->ObjectName->Buffer, ObjectAttributes->ObjectName->Length);
-		
-			//
-			// Does it contain our special file name?
-			//
-			if (wcsstr(ObjectName, L"ifh--"))
-			{
-				LOG("Denying access to file: %wZ.\n", ObjectAttributes->ObjectName);
-
-				ExFreePoolWithTag(ObjectName, POOLTAG);
-
-				//
-				// The demo denies access to said file.
-				//
-				return STATUS_ACCESS_DENIED;
-			}
-
-			ExFreePoolWithTag(ObjectName, POOLTAG);
-		}
+		return STATUS_INVALID_PARAMETER_1;
+	}
+	//
+	// if someone has x86-x64 emulator with basic x86/x64 instruction set, feel free to commit
+	// 
+	// cpu::emulator(efi::oGetVariable, VariableName, VendorGuid, Attributes, DataSize, Data);
+	//
+	QWORD status = oGetVariable(VariableName->Buffer, VendorGuid, (DWORD*)Attributes, (QWORD*)ValueLength, Value);
+	if (status != 0)
+	{
+		return STATUS_INVALID_PARAMETER;
 	}
 
-	//
-	// We're uninterested, call the original.
-	//
-	return NtCreateFile(FileHandle, DesiredAccess, ObjectAttributes, IoStatusBlock, AllocationSize, FileAttributes, ShareAccess, CreateDisposition, CreateOptions, EaBuffer, EaLength);
+	return STATUS_SUCCESS;
 }
 
-void __fastcall hooks::syscall::SyscallStub(unsigned int SyscallIndex, void **SyscallFunction)
+NTSTATUS NTAPI hooks::efi::NtSetSystemEnvironmentValueExHook(
+    PUNICODE_STRING VariableName,
+    LPGUID VendorGuid,
+    PVOID Value,
+    ULONG ValueLength,
+    ULONG Attributes
+    )
+{
+	if (VariableName == 0 || VendorGuid == 0)
+	{
+		return STATUS_INVALID_PARAMETER_1;
+	}
+	//
+	// if someone has x86-x64 emulator with basic x86/x64 instruction set, feel free to commit
+	// 
+	// cpu::emulator(efi::oSetVariable, VariableName, VendorGuid, Attributes, DataSize, Data);
+	//
+	QWORD status = oSetVariable(VariableName->Buffer, VendorGuid, Attributes, ValueLength, Value);
+	if (status != 0)
+	{
+		return STATUS_INVALID_PARAMETER;
+	}
+
+	return STATUS_SUCCESS;
+}
+
+void __fastcall hooks::syscall::SyscallStub(unsigned int SyscallIndex, void** SyscallFunction)
 {
 	UNREFERENCED_PARAMETER(SyscallIndex);
 	UNREFERENCED_PARAMETER(SyscallFunction);
 
-	if (*SyscallFunction == (void*)NtCreateFile)
+	if (*SyscallFunction == (void*)efi::NtQuerySystemEnvironmentValueEx)
 	{
-		*SyscallFunction = DetourNtCreateFile;
+		*SyscallFunction = efi::NtQuerySystemEnvironmentValueExHook;
 	}
 
-	//
-	// to-do / would like to try at some point -->:
-	//
-	// if (*SyscallFunction == (void*)NtQuerySystemEnvironmentValueEx)
-	//	*SyscallFunction = DetourNtQuerySystemEnvironmentValueEx;
-	// 
-	// DetourNtQuerySystemEnvironmentValueEx:
-	//	$status = cpu::emulator(efi::oGetVariable, VariableName, VendorGuid, Attributes, DataSize, Data);
-	//
+	else if (*SyscallFunction == (void*)efi::NtSetSystemEnvironmentValueEx)
+	{
+		*SyscallFunction = efi::NtSetSystemEnvironmentValueExHook;
+	}
 }
 
 QWORD hooks::syscall::KeQueryPerformanceCounterHook(QWORD rcx)
@@ -315,11 +327,11 @@ QWORD hooks::input::MouseClassServiceCallbackHook(
 	//  *(UCHAR*)(__readgsqword(0x20) + 0x33BA) == 1 (DpcRoutineActive) 
 	//  *(QWORD*)(__readgsqword(0x20) + 0x3320) == Wdf01000.sys:0x6ca0 (void __fastcall imp_VfWdfRequestGetParameters) (CurrentDpcRoutine)
 	//
-	
+
 	//
 	// call should be coming from ntoskrnl.exe IopfCompleteRequest
 	//
-	if (return_address >= ntoskrnl.base && return_address <= (ntoskrnl.base + ntoskrnl.size))
+	if (return_address >= globals::ntoskrnl.base && return_address <= (globals::ntoskrnl.base + globals::ntoskrnl.size))
 	{
 		mouse_data = *InputDataStart;
 	}
@@ -362,19 +374,19 @@ NTSTATUS hooks::input::MouseClassReadHook(PDEVICE_OBJECT device, PIRP irp)
 	//
 	// do not allow mouse hook with vmware
 	//
-	if (vmusbmouse.base == 0)
+	if (globals::vmusbmouse.base == 0)
 	{
-		QWORD *routine;
-		routine=(QWORD*)irp;
-		routine+=0xb;
+		QWORD* routine;
+		routine = (QWORD*)irp;
+		routine += 0xb;
 		if (rimInputApc == 0)
 		{
 			*(QWORD*)&rimInputApc = *routine;
 		}
-		*routine=(ULONGLONG)MouseApc;
+		*routine = (ULONGLONG)MouseApc;
 		mouse_irp = (struct _MOUSE_INPUT_DATA*)irp->UserBuffer;
 	}
-	return hooks::input::oMouseClassRead(device,irp);
+	return hooks::input::oMouseClassRead(device, irp);
 }
 
 void update_mouse_devices(QWORD callback, QWORD original_callback, PDRIVER_OBJECT mouclass, PDRIVER_OBJECT mouhid);
@@ -398,10 +410,10 @@ void __fastcall hooks::exception::KdTrapHook(void)
 
 
 	QWORD KeBugCheckExPtr = (QWORD)KeBugCheckEx;
-	KeBugCheckExPtr       = KeBugCheckExPtr + 0x23;
-	KeBugCheckExPtr       = KeBugCheckExPtr + 0x03;
-	DWORD ctx_offset      = *(DWORD*)KeBugCheckExPtr;
-	struct  _CONTEXT *current_context = *(struct  _CONTEXT **)(__readgsqword(0x20) + ctx_offset);
+	KeBugCheckExPtr = KeBugCheckExPtr + 0x23;
+	KeBugCheckExPtr = KeBugCheckExPtr + 0x03;
+	DWORD ctx_offset = *(DWORD*)KeBugCheckExPtr;
+	struct  _CONTEXT* current_context = *(struct  _CONTEXT**)(__readgsqword(0x20) + ctx_offset);
 
 
 	//
@@ -427,8 +439,8 @@ void __fastcall hooks::exception::KdTrapHook(void)
 	QWORD thread  = __readgsqword(0x188);
 	QWORD process = *(QWORD*)(thread + 0xB8);
 	QWORD thread_process = *(QWORD*)(thread + 0x98 + 0x20);
-		
-	
+
+
 	//
 	// exception was caught
 	//
@@ -466,8 +478,6 @@ BOOLEAN is_unlinked_thread(QWORD process, QWORD thread)
 
 BOOLEAN unlink_thread_detection(QWORD thread)
 {
-	BOOLEAN hidden = 0;
-
 	if (thread == 0)
 		return 0;
 
@@ -485,27 +495,17 @@ BOOLEAN unlink_thread_detection(QWORD thread)
 		}
 	}
 
-	if (is_unlinked_thread(host_process, thread))
-	{
-		LOG("[%s][%ld] Thread is unlinked [%llx]\n",
-			PsGetProcessImageFileName(host_process),
-			(DWORD)(QWORD)PsGetThreadId((PETHREAD)thread),
-			thread
-		);
-		hidden = 1;
-	}
-
-	return hidden;
+	return is_unlinked_thread(host_process, thread);
 }
 
 UCHAR __fastcall hooks::swap_ctx::HalClearLastBranchRecordStackHook(void)
 {
-	QWORD current_thread  = __readgsqword(0x188);
+	QWORD current_thread = __readgsqword(0x188);
 	QWORD cr3 = __readcr3();
 
 	if (unlink_thread_detection(current_thread))
 	{
-		LOG("[%lld] SwapContext: %llx, %llx\n", PsGetCurrentThreadId(), current_thread, cr3);
+		LOG("Unlinked thread found [%lld] [%llX] [%llX]\n", (QWORD)PsGetCurrentThreadId(), current_thread, cr3);
 	}
 
 	return swap_ctx::oHalClearLastBranchRecordStack();
@@ -524,13 +524,13 @@ typedef struct _KLDR_DATA_TABLE_ENTRY {
 	UNICODE_STRING BaseImageName;
 } LDR_DATA_TABLE_ENTRY, * PLDR_DATA_TABLE_ENTRY;
 
-extern "C" __declspec(dllimport) LIST_ENTRY *PsLoadedModuleList;
+extern "C" __declspec(dllimport) LIST_ENTRY * PsLoadedModuleList;
 MODULE_INFO get_module_info(PWCH module_name)
 {
 	PLDR_DATA_TABLE_ENTRY module_entry = CONTAINING_RECORD(PsLoadedModuleList, LDR_DATA_TABLE_ENTRY, InLoadOrderLinks);
 	if (!wcscmp(module_entry->BaseImageName.Buffer, module_name))
 	{
-		return {(QWORD)module_entry->ImageBase, module_entry->SizeOfImage};
+		return { (QWORD)module_entry->ImageBase, module_entry->SizeOfImage };
 	}
 
 	for (PLIST_ENTRY list_entry = PsLoadedModuleList->Flink; list_entry != PsLoadedModuleList; list_entry = list_entry->Flink)
@@ -544,14 +544,14 @@ MODULE_INFO get_module_info(PWCH module_name)
 
 		if (!wcscmp(module_entry->BaseImageName.Buffer, module_name))
 		{
-			return {(QWORD)module_entry->ImageBase, module_entry->SizeOfImage};
+			return { (QWORD)module_entry->ImageBase, module_entry->SizeOfImage };
 		}
 	}
 	return {};
 }
 
-extern "C" __declspec(dllimport) LIST_ENTRY *PsLoadedModuleList;
-PCWSTR GetCallerModuleName(QWORD address, QWORD *offset)
+extern "C" __declspec(dllimport) LIST_ENTRY * PsLoadedModuleList;
+PCWSTR GetCallerModuleName(QWORD address, QWORD* offset)
 {
 	PLDR_DATA_TABLE_ENTRY module_entry = CONTAINING_RECORD(PsLoadedModuleList, LDR_DATA_TABLE_ENTRY, InLoadOrderLinks);
 	if (address >= (QWORD)module_entry->ImageBase && address <= (QWORD)((QWORD)module_entry->ImageBase + module_entry->SizeOfImage + 0x1000))
@@ -592,16 +592,16 @@ ObReferenceObjectByName(
 	__in POBJECT_TYPE ObjectType,
 	__in KPROCESSOR_MODE AccessMode,
 	__inout_opt PVOID ParseContext,
-	__out PVOID* Object
+	__out PVOID * Object
 );
 
-extern "C" NTSYSCALLAPI POBJECT_TYPE* IoDriverObjectType;
-QWORD get_mouse_callback_address(PDRIVER_OBJECT *mouclass, PDRIVER_OBJECT *mouhid)
+extern "C" NTSYSCALLAPI POBJECT_TYPE * IoDriverObjectType;
+QWORD get_mouse_callback_address(PDRIVER_OBJECT* mouclass, PDRIVER_OBJECT* mouhid)
 {
 	//
 	// https://github.com/nbqofficial/norsefire
 	//
-	
+
 	UNICODE_STRING class_string;
 	RtlInitUnicodeString(&class_string, L"\\Driver\\MouClass");
 
@@ -611,7 +611,7 @@ QWORD get_mouse_callback_address(PDRIVER_OBJECT *mouclass, PDRIVER_OBJECT *mouhi
 	if (!NT_SUCCESS(status)) {
 		return 0;
 	}
-	
+
 	if (mouclass)
 		*mouclass = class_driver_object;
 
@@ -684,19 +684,62 @@ void update_mouse_devices(QWORD current_callback, QWORD callback, PDRIVER_OBJECT
 extern "C" NTSYSCALLAPI NTSTATUS HalPrivateDispatchTable(void);
 extern "C" NTSYSCALLAPI NTSTATUS HalEnumerateEnvironmentVariablesEx(void);
 
-extern "C" NTSYSCALLAPI NTSTATUS 
-ZwSetSystemInformation (
-    ULONG SystemInformationClass, 
-    PVOID SystemInformation, 
-    ULONG SystemInformationLength);
 
-extern "C" NTSYSCALLAPI NTSTATUS
-ZwQuerySystemInformation(
-    ULONG                    SystemInformationClass,
-    PVOID                    SystemInformation,
-    ULONG                    SystemInformationLength,
-    PULONG                   ReturnLength
-);
+QWORD GetExportByName(QWORD base, const char* export_name)
+{
+	QWORD a0;
+	DWORD a1[4];
+
+	a0 = base + *(unsigned short*)(base + 0x3C);
+	if (a0 == base)
+	{
+		return 0;
+	}
+
+
+	WORD machine = *(WORD*)(a0 + 0x4);
+
+	a0 = machine == 0x8664 ? base + *(DWORD*)(a0 + 0x88) : base + *(DWORD*)(a0 + 0x78);
+
+	if (a0 == base)
+	{
+		return 0;
+	}
+
+
+	a1[0] = *(DWORD*)(a0 + 0x18);
+	a1[1] = *(DWORD*)(a0 + 0x1C);
+	a1[2] = *(DWORD*)(a0 + 0x20);
+	a1[3] = *(DWORD*)(a0 + 0x24);
+	while (a1[0]--) {
+		a0 = base + *(DWORD*)(base + a1[2] + (a1[0] * 4));
+		if (strcmp((const char*)a0, export_name) == 0)
+		{
+			return (base + *(DWORD*)(base + a1[1] + (*(unsigned short*)(base + a1[3] + (a1[0] * 2)) * 4)));
+		}
+	}
+	return 0;
+}
+
+QWORD GetAddressByRef(QWORD ref, BOOLEAN inc)
+{
+	QWORD val = ref;
+
+	while (1)
+	{
+		if (*(unsigned char*)val == 0xE8)
+		{
+			if ((val + 5) + *(int*)(val + 1) == ref)
+				break;
+		}
+		if (inc) val++; else val--;
+	}
+
+	while (*(unsigned char*)val != 0xCC)
+		val--;
+
+	return val + 1;
+}
 
 BOOLEAN hooks::install(void)
 {
@@ -722,7 +765,7 @@ BOOLEAN hooks::install(void)
 
 	*(QWORD*)&syscall::oKeQueryPerformanceCounter = *(QWORD*)(temp + 0x70);
 	*(QWORD*)(temp + 0x70) = (QWORD)syscall::KeQueryPerformanceCounterHook;
-	syscall::SystemCallEntryPage = (QWORD)ImgGetSyscallEntry((PVOID)ntoskrnl.base);
+	syscall::SystemCallEntryPage = (QWORD)ImgGetSyscallEntry((PVOID)globals::ntoskrnl.base);
 
 
 	//
@@ -734,7 +777,7 @@ BOOLEAN hooks::install(void)
 
 	update_mouse_devices(input::mouclass_routine, (QWORD)input::MouseClassServiceCallbackHook, input::mouclass, input::mouhid);
 
-	
+
 	input::oMouseClassRead = input::mouclass->MajorFunction[IRP_MJ_READ];
 	input::mouclass->MajorFunction[IRP_MJ_READ] = input::MouseClassReadHook;
 
@@ -745,7 +788,7 @@ BOOLEAN hooks::install(void)
 	//
 	// global exception hook
 	//
-	exception::KdpDebugRoutineSelect = FindPattern(ntoskrnl.base, (BYTE*)"\x83\x3D\x00\x00\x00\x00\x00\x8A\x44", (BYTE*)"xx????xxx");
+	exception::KdpDebugRoutineSelect = FindPattern(globals::ntoskrnl.base, (BYTE*)"\x83\x3D\x00\x00\x00\x00\x00\x8A\x44", (BYTE*)"xx????xxx");
 	if (exception::KdpDebugRoutineSelect == 0)
 	{
 	E0:
@@ -755,7 +798,7 @@ BOOLEAN hooks::install(void)
 		return 0;
 	}
 
-	exception::PoHiderInProgress = FindPattern(ntoskrnl.base, (BYTE*)"\xC6\x05\x00\x00\x00\x00\x01\x33\xC9\xE8", (BYTE*)"xx????xxxx");
+	exception::PoHiderInProgress = FindPattern(globals::ntoskrnl.base, (BYTE*)"\xC6\x05\x00\x00\x00\x00\x01\x33\xC9\xE8", (BYTE*)"xx????xxxx");
 	if (exception::PoHiderInProgress == 0)
 	{
 		goto E0;
@@ -784,7 +827,7 @@ BOOLEAN hooks::install(void)
 	// set KiCpuTracingFlags 2
 	//
 	QWORD KiCpuTracingFlags = (QWORD)KeBugCheckEx;
-	while (*(unsigned short*)KiCpuTracingFlags != 0xE800) KiCpuTracingFlags++; KiCpuTracingFlags+=2;
+	while (*(unsigned short*)KiCpuTracingFlags != 0xE800) KiCpuTracingFlags++; KiCpuTracingFlags += 2;
 	while (*(unsigned short*)KiCpuTracingFlags != 0xE800) KiCpuTracingFlags++; KiCpuTracingFlags++;
 	KiCpuTracingFlags = (KiCpuTracingFlags + 5) + *(int*)(KiCpuTracingFlags + 1);
 	while (*(unsigned short*)KiCpuTracingFlags != 0x05F7) KiCpuTracingFlags++;
@@ -806,6 +849,12 @@ BOOLEAN hooks::install(void)
 
 	*(QWORD*)&efi::oGetVariable = *(QWORD*)(HalEfiRuntimeServicesBlock + 0x18);
 	*(QWORD*)&efi::oSetVariable = *(QWORD*)(HalEfiRuntimeServicesBlock + 0x28);
+
+	efi::NtSetSystemEnvironmentValueEx =
+		GetAddressByRef((QWORD)GetExportByName(globals::ntoskrnl.base, "ExSetFirmwareEnvironmentVariable"), 1);
+
+	efi::NtQuerySystemEnvironmentValueEx =
+		GetAddressByRef((QWORD)GetExportByName(globals::ntoskrnl.base, "ExGetFirmwareEnvironmentVariable"), 0);
 
 	return 1;
 }
@@ -850,7 +899,7 @@ void hooks::uninstall(void)
 	// set KiCpuTracingFlags 0
 	//
 	QWORD KiCpuTracingFlags = (QWORD)KeBugCheckEx;
-	while (*(unsigned short*)KiCpuTracingFlags != 0xE800) KiCpuTracingFlags++; KiCpuTracingFlags+=2;
+	while (*(unsigned short*)KiCpuTracingFlags != 0xE800) KiCpuTracingFlags++; KiCpuTracingFlags += 2;
 	while (*(unsigned short*)KiCpuTracingFlags != 0xE800) KiCpuTracingFlags++; KiCpuTracingFlags++;
 	KiCpuTracingFlags = (KiCpuTracingFlags + 5) + *(int*)(KiCpuTracingFlags + 1);
 	while (*(unsigned short*)KiCpuTracingFlags != 0x05F7) KiCpuTracingFlags++;
@@ -866,12 +915,12 @@ static int CheckMask(unsigned char* base, unsigned char* pattern, unsigned char*
 	return 1;
 }
 
-void *FindPatternEx(unsigned char* base, QWORD size, unsigned char* pattern, unsigned char* mask)
+void* FindPatternEx(unsigned char* base, QWORD size, unsigned char* pattern, unsigned char* mask)
 {
-	size -= strlen((const char *)mask);
+	size -= strlen((const char*)mask);
 	for (QWORD i = 0; i <= size; ++i) {
 		void* addr = &base[i];
-		if (CheckMask((unsigned char *)addr, pattern, mask))
+		if (CheckMask((unsigned char*)addr, pattern, mask))
 			return addr;
 	}
 	return 0;
@@ -884,7 +933,7 @@ QWORD FindPattern(QWORD base, unsigned char* pattern, unsigned char* mask)
 		return 0;
 	}
 
-	QWORD nt_header = (QWORD)*(DWORD*)(base + 0x03C) + base;
+	QWORD nt_header = (QWORD) * (DWORD*)(base + 0x03C) + base;
 	if (nt_header == base)
 	{
 		return 0;
@@ -901,10 +950,10 @@ QWORD FindPattern(QWORD base, unsigned char* pattern, unsigned char* mask)
 
 		if (section_characteristics & 0x00000020 && !(section_characteristics & 0x02000000))
 		{
-			QWORD virtual_address = base + (QWORD)*(DWORD*)(section + 0x0C);
+			QWORD virtual_address = base + (QWORD) * (DWORD*)(section + 0x0C);
 			DWORD virtual_size = *(DWORD*)(section + 0x08);
 
-			QWORD addr = (QWORD)FindPatternEx( (unsigned char*)virtual_address, virtual_size, pattern, mask);
+			QWORD addr = (QWORD)FindPatternEx((unsigned char*)virtual_address, virtual_size, pattern, mask);
 			if (addr)
 			{
 				return addr;
@@ -915,14 +964,14 @@ QWORD FindPattern(QWORD base, unsigned char* pattern, unsigned char* mask)
 }
 
 EXTERN_C
-NTSYSCALLAPI 
+NTSYSCALLAPI
 NTSTATUS
 NTAPI
-ZwTraceControl (
+ZwTraceControl(
 	_In_ ULONG FunctionCode,
 	_In_reads_bytes_opt_(InBufferLen) PVOID InBuffer,
 	_In_ ULONG InBufferLen,
-	 _Out_writes_bytes_opt_(OutBufferLen) PVOID OutBuffer,
+	_Out_writes_bytes_opt_(OutBufferLen) PVOID OutBuffer,
 	_In_ ULONG OutBufferLen,
 	_Out_ PULONG ReturnLength
 );
@@ -955,12 +1004,12 @@ typedef struct _WNODE_HEADER
 		ULONG CountLost;         // Reserved
 		HANDLE KernelHandle;     // Kernel handle for data block
 		LARGE_INTEGER TimeStamp; // Timestamp as returned in units of 100ns
-								 // since 1/1/1601
+		// since 1/1/1601
 	} DUMMYUNIONNAME2;
 	GUID Guid;                  // Guid for data block returned with results
 	ULONG ClientContext;
 	ULONG Flags;             // Flags, see below
-} WNODE_HEADER, *PWNODE_HEADER;
+} WNODE_HEADER, * PWNODE_HEADER;
 
 typedef struct _EVENT_TRACE_PROPERTIES {
 	WNODE_HEADER	Wnode;
@@ -981,15 +1030,15 @@ typedef struct _EVENT_TRACE_PROPERTIES {
 	HANDLE			LoggerThreadId;
 	ULONG			LogFileNameOffset;
 	ULONG			LoggerNameOffset;
-} EVENT_TRACE_PROPERTIES, *PEVENT_TRACE_PROPERTIES;
+} EVENT_TRACE_PROPERTIES, * PEVENT_TRACE_PROPERTIES;
 
-typedef struct _CKCL_TRACE_PROPERIES: EVENT_TRACE_PROPERTIES
+typedef struct _CKCL_TRACE_PROPERIES : EVENT_TRACE_PROPERTIES
 {
 	ULONG64				Unknown[3];
 	UNICODE_STRING			ProviderName;
-} CKCL_TRACE_PROPERTIES, *PCKCL_TRACE_PROPERTIES;
+} CKCL_TRACE_PROPERTIES, * PCKCL_TRACE_PROPERTIES;
 
-const GUID session_guid = { 0x9E814AAD, 0x3204, 0x11D2, { 0x9A, 0x82, 0x0, 0x60, 0x8, 0xA8, 0x69, 0x39 }  };
+const GUID session_guid = { 0x9E814AAD, 0x3204, 0x11D2, { 0x9A, 0x82, 0x0, 0x60, 0x8, 0xA8, 0x69, 0x39 } };
 
 //
 // https://github.com/everdox/InfinityHook / https://revers.engineering/fun-with-pg-compliant-hook/
