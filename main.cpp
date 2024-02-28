@@ -44,6 +44,7 @@ namespace globals
 {
 	MODULE_INFO ntoskrnl;
 	MODULE_INFO vmusbmouse;
+	DWORD       exit = 0;
 }
 
 namespace hooks
@@ -133,6 +134,14 @@ extern "C" VOID DriverUnload(
 )
 {
 	UNREFERENCED_PARAMETER(DriverObject);
+
+	globals::exit = 1;
+	while (globals::exit != 2)
+	{
+		NtSleep(100);
+		LOG("Please move mouse in order to unload the driver\n");
+	}
+
 	hooks::uninstall();
 
 	NtSleep(200);
@@ -147,7 +156,7 @@ extern "C" NTSTATUS DriverEntry(
 	UNREFERENCED_PARAMETER(RegistryPath);
 	UNREFERENCED_PARAMETER(DriverObject);
 
-	globals::ntoskrnl = get_module_info(L"ntoskrnl.exe");
+	globals::ntoskrnl = get_module_info(0);
 	globals::vmusbmouse = get_module_info(L"vmusbmouse.sys");
 	if (!hooks::install())
 	{
@@ -156,14 +165,7 @@ extern "C" NTSTATUS DriverEntry(
 	}
 
 	LOG("Running\n");
-
-	//
-	// allow driver unload only with vmware
-	//
-	if (globals::vmusbmouse.base != 0)
-	{
-		DriverObject->DriverUnload = DriverUnload;
-	}
+	DriverObject->DriverUnload = DriverUnload;
 	return STATUS_SUCCESS;
 }
 
@@ -383,7 +385,18 @@ NTSTATUS hooks::input::MouseClassReadHook(PDEVICE_OBJECT device, PIRP irp)
 		{
 			*(QWORD*)&rimInputApc = *routine;
 		}
-		*routine = (ULONGLONG)MouseApc;
+		if (globals::exit == 0)
+		{
+			*routine = (ULONGLONG)MouseApc;
+		}
+		else
+		{
+			if (rimInputApc)
+			{
+				*routine = (ULONGLONG)rimInputApc;
+			}
+			globals::exit = 2;
+		}
 		mouse_irp = (struct _MOUSE_INPUT_DATA*)irp->UserBuffer;
 	}
 	return hooks::input::oMouseClassRead(device, irp);
@@ -528,7 +541,7 @@ extern "C" __declspec(dllimport) LIST_ENTRY * PsLoadedModuleList;
 MODULE_INFO get_module_info(PWCH module_name)
 {
 	PLDR_DATA_TABLE_ENTRY module_entry = CONTAINING_RECORD(PsLoadedModuleList, LDR_DATA_TABLE_ENTRY, InLoadOrderLinks);
-	if (!wcscmp(module_entry->BaseImageName.Buffer, module_name))
+	if (module_name == 0)
 	{
 		return { (QWORD)module_entry->ImageBase, module_entry->SizeOfImage };
 	}
@@ -542,7 +555,7 @@ MODULE_INFO get_module_info(PWCH module_name)
 		if (module_entry->BaseImageName.Length == 0)
 			continue;
 
-		if (!wcscmp(module_entry->BaseImageName.Buffer, module_name))
+		if (module_entry->BaseImageName.Buffer && !wcscmp(module_entry->BaseImageName.Buffer, module_name))
 		{
 			return { (QWORD)module_entry->ImageBase, module_entry->SizeOfImage };
 		}
