@@ -292,6 +292,8 @@ NTSTATUS hooks::input::MouseClassReadHook(PDEVICE_OBJECT device, PIRP irp)
 	if (irpSp->Parameters.Read.Length == 0)
 		goto E0;
 
+	if (irpSp->Parameters.Read.Length % sizeof(MOUSE_INPUT_DATA))
+		goto E0;
 
 	QWORD          extension = (QWORD)device->DeviceExtension;
 	PDEVICE_OBJECT hid = *(PDEVICE_OBJECT*)(extension + 0x10);
