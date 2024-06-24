@@ -88,20 +88,8 @@ namespace hooks
 	namespace input
 	{
 		PDRIVER_OBJECT    mouclass;
-		PDRIVER_OBJECT    mouhid;
-		QWORD             mouclass_routine;
-
-		MOUSE_INPUT_DATA  mouse_data;
-		PMOUSE_INPUT_DATA mouse_irp;
-
-		NTSTATUS          (*rimInputApc)(void* a1, void* a2, void* a3, void* a4, void* a5);
 		NTSTATUS          (*oMouseClassRead)(PDEVICE_OBJECT device, PIRP irp);
-		NTSTATUS          (*oMouseAddDevice)(PDRIVER_OBJECT DriverObject, PDEVICE_OBJECT PhysicalDeviceObject);
-
-		QWORD             MouseClassServiceCallbackHook(PDEVICE_OBJECT DeviceObject, PMOUSE_INPUT_DATA InputDataStart, PMOUSE_INPUT_DATA InputDataEnd, PULONG InputDataConsumed);
-		NTSTATUS          MouseApc(void* a1, void* a2, void* a3, void* a4, void* a5);
 		NTSTATUS          MouseClassReadHook(PDEVICE_OBJECT device, PIRP irp);
-		NTSTATUS          MouseAddDeviceHook(IN PDRIVER_OBJECT DriverObject, IN PDEVICE_OBJECT PhysicalDeviceObject);
 	}
 
 	namespace exception
@@ -136,12 +124,6 @@ extern "C" VOID DriverUnload(
 	UNREFERENCED_PARAMETER(DriverObject);
 
 	globals::exit = 1;
-	while (globals::exit != 2)
-	{
-		NtSleep(100);
-		LOG("Please move mouse in order to unload the driver\n");
-	}
-
 	hooks::uninstall();
 
 	NtSleep(200);
@@ -300,117 +282,33 @@ QWORD hooks::syscall::KeQueryPerformanceCounterHook(QWORD rcx)
 	return oKeQueryPerformanceCounter(rcx);
 }
 
-QWORD hooks::input::MouseClassServiceCallbackHook(
-	PDEVICE_OBJECT DeviceObject,
-	PMOUSE_INPUT_DATA InputDataStart,
-	PMOUSE_INPUT_DATA InputDataEnd,
-	PULONG InputDataConsumed
-)
-{
-	QWORD rsp = (QWORD)_AddressOfReturnAddress();
-
-
-
-	rsp = rsp + 0x08;  // call MouseClassServiceCallback
-	rsp = rsp + 0x08;  // push rbp
-	rsp = rsp + 0x08;  // push rbx
-	rsp = rsp + 0x08;  // push rsi
-	rsp = rsp + 0x08;  // push rdi
-	rsp = rsp + 0x08;  // push r12
-	rsp = rsp + 0x08;  // push r13
-	rsp = rsp + 0x08;  // push r14
-	rsp = rsp + 0x08;  // push r15
-	rsp = rsp + 0x58;  // sub  rsp,  58h
-
-	QWORD return_address = *(QWORD*)(rsp);
-
-	//
-	// extra data
-	//  *(UCHAR*)(__readgsqword(0x20) + 0x33BA) == 1 (DpcRoutineActive) 
-	//  *(QWORD*)(__readgsqword(0x20) + 0x3320) == Wdf01000.sys:0x6ca0 (void __fastcall imp_VfWdfRequestGetParameters) (CurrentDpcRoutine)
-	//
-
-	//
-	// call should be coming from ntoskrnl.exe IopfCompleteRequest
-	//
-	if (return_address >= globals::ntoskrnl.base && return_address <= (globals::ntoskrnl.base + globals::ntoskrnl.size))
-	{
-		mouse_data = *InputDataStart;
-	}
-	else
-	{
-		memset(&mouse_data, 0, sizeof(mouse_data));
-	}
-	//
-	// HidpDistributeInterruptReport->IofCompleteRequest->IopfCompleteRequest->MouHid_ReadComplete->MouseClassServiceCallback->MouseClassRead->win32k.sys:rimInputApc
-	//
-	return ((QWORD(*)(PDEVICE_OBJECT, PMOUSE_INPUT_DATA, PMOUSE_INPUT_DATA, PULONG))(mouclass_routine))(
-		DeviceObject,
-		InputDataStart,
-		InputDataEnd,
-		InputDataConsumed
-		);
-}
-
-//
-// https:://github.com/everdox/hidinput
-//
-NTSTATUS hooks::input::MouseApc(void* a1, void* a2, void* a3, void* a4, void* a5)
-{
-	for (int i = sizeof(MOUSE_INPUT_DATA); i--;)
-	{
-		if (((unsigned char*)mouse_irp)[i] != ((unsigned char*)&mouse_data)[i])
-		{
-			DbgPrintEx(77, 0, "invalid mouse packet detected\n");
-			break;
-		}
-	}
-	return rimInputApc(a1, a2, a3, a4, a5);
-}
-
 //
 // https:://github.com/everdox/hidinput
 //
 NTSTATUS hooks::input::MouseClassReadHook(PDEVICE_OBJECT device, PIRP irp)
 {
-	//
-	// do not allow mouse hook with vmware
-	//
-	if (globals::vmusbmouse.base == 0)
-	{
-		QWORD* routine;
-		routine = (QWORD*)irp;
-		routine += 0xb;
-		if (rimInputApc == 0)
-		{
-			*(QWORD*)&rimInputApc = *routine;
-		}
-		if (globals::exit == 0)
-		{
-			*routine = (ULONGLONG)MouseApc;
-		}
-		else
-		{
-			if (rimInputApc)
-			{
-				*routine = (ULONGLONG)rimInputApc;
-			}
-			globals::exit = 2;
-		}
-		mouse_irp = (struct _MOUSE_INPUT_DATA*)irp->UserBuffer;
-	}
-	return hooks::input::oMouseClassRead(device, irp);
-}
 
-void update_mouse_devices(QWORD callback, QWORD original_callback, PDRIVER_OBJECT mouclass, PDRIVER_OBJECT mouhid);
-NTSTATUS hooks::input::MouseAddDeviceHook(IN PDRIVER_OBJECT DriverObject, IN PDEVICE_OBJECT PhysicalDeviceObject)
-{
-	NTSTATUS status = oMouseAddDevice(DriverObject, PhysicalDeviceObject);
-	if (status == 0)
+	PIO_STACK_LOCATION irpSp = irp->Tail.Overlay.CurrentStackLocation;
+	if (irpSp->Parameters.Read.Length == 0)
+		goto E0;
+
+
+	QWORD          extension = (QWORD)device->DeviceExtension;
+	PDEVICE_OBJECT hid = *(PDEVICE_OBJECT*)(extension + 0x10);
+	QWORD          phid = (QWORD)hid->DeviceExtension;
+	if (phid)
 	{
-		update_mouse_devices((QWORD)mouclass_routine, (QWORD)MouseClassServiceCallbackHook, mouclass, mouhid);
+		for (int i = sizeof(MOUSE_INPUT_DATA); i--;)
+		{
+			if (((unsigned char*)phid + 0x160)[i] != ((unsigned char*)irp->UserBuffer)[i])
+			{
+				LOG("invalid mouse packet, device: 0x%llx\n", device);
+				break;
+			}
+		}
 	}
-	return status;
+E0:
+	return hooks::input::oMouseClassRead(device, irp);
 }
 
 extern "C" __declspec(dllimport) PCSTR PsGetProcessImageFileName(QWORD process);
@@ -502,12 +400,12 @@ BOOLEAN unlink_thread_detection(QWORD thread)
 		(PETHREAD*)&lookup_thread
 	)))
 	{
+		ObfDereferenceObject((PVOID)lookup_thread);
 		if (lookup_thread == thread)
 		{
 			return 0;
 		}
 	}
-
 	return is_unlinked_thread(host_process, thread);
 }
 
@@ -609,89 +507,18 @@ ObReferenceObjectByName(
 );
 
 extern "C" NTSYSCALLAPI POBJECT_TYPE * IoDriverObjectType;
-QWORD get_mouse_callback_address(PDRIVER_OBJECT* mouclass, PDRIVER_OBJECT* mouhid)
+void get_mouse_class_address(PDRIVER_OBJECT* mouclass)
 {
-	//
-	// https://github.com/nbqofficial/norsefire
-	//
-
 	UNICODE_STRING class_string;
 	RtlInitUnicodeString(&class_string, L"\\Driver\\MouClass");
 
-
-	PDRIVER_OBJECT class_driver_object = 0;
-	NTSTATUS status = ObReferenceObjectByName(&class_string, OBJ_CASE_INSENSITIVE, 0, 0, *IoDriverObjectType, KernelMode, 0, (PVOID*)&class_driver_object);
-	if (!NT_SUCCESS(status)) {
-		return 0;
-	}
+	PDRIVER_OBJECT driver_object = 0;
+	ObReferenceObjectByName(&class_string, OBJ_CASE_INSENSITIVE, 0, 0, *IoDriverObjectType, KernelMode, 0, (PVOID*)&driver_object);
 
 	if (mouclass)
-		*mouclass = class_driver_object;
+		*mouclass = driver_object;
 
-	UNICODE_STRING hid_string;
-	RtlInitUnicodeString(&hid_string, L"\\Driver\\MouHID");
-
-	PDRIVER_OBJECT hid_driver_object = 0;
-	status = ObReferenceObjectByName(&hid_string, OBJ_CASE_INSENSITIVE, 0, 0, *IoDriverObjectType, KernelMode, 0, (PVOID*)&hid_driver_object);
-	if (!NT_SUCCESS(status))
-	{
-		ObfDereferenceObject(class_driver_object);
-		return 0;
-	}
-
-	if (mouhid)
-		*mouhid = hid_driver_object;
-
-	QWORD result = 0;
-	PDEVICE_OBJECT hid_device_object = hid_driver_object->DeviceObject;
-	while (hid_device_object)
-	{
-		PDEVICE_OBJECT class_device_object = class_driver_object->DeviceObject;
-		while (class_device_object)
-		{
-			PULONG_PTR device_extension = (PULONG_PTR)hid_device_object->DeviceExtension;
-			ULONG_PTR device_ext_size = ((ULONG_PTR)hid_device_object->DeviceObjectExtension - (ULONG_PTR)hid_device_object->DeviceExtension) / 4;
-			for (ULONG_PTR i = 0; i < device_ext_size; i++)
-			{
-				if (device_extension[i] == (ULONG_PTR)class_device_object && device_extension[i + 1] > (ULONG_PTR)class_driver_object)
-				{
-					result = (QWORD)(device_extension[i + 1]);
-					goto E0;
-				}
-			}
-			class_device_object = class_device_object->NextDevice;
-		}
-		hid_device_object = hid_device_object->AttachedDevice;
-	}
-E0:
-	ObfDereferenceObject(class_driver_object);
-	ObfDereferenceObject(hid_driver_object);
-	return result;
-}
-
-void update_mouse_devices(QWORD current_callback, QWORD callback, PDRIVER_OBJECT mouclass, PDRIVER_OBJECT mouhid)
-{
-	PDEVICE_OBJECT hid_device_object = mouhid->DeviceObject;
-	while (hid_device_object)
-	{
-		PDEVICE_OBJECT class_device_object = mouclass->DeviceObject;
-		while (class_device_object)
-		{
-			PULONG_PTR device_extension = (PULONG_PTR)hid_device_object->DeviceExtension;
-			ULONG_PTR device_ext_size =
-				((ULONG_PTR)hid_device_object->DeviceObjectExtension - (ULONG_PTR)hid_device_object->DeviceExtension) / 4;
-
-			for (ULONG_PTR i = 0; i < device_ext_size; i++)
-			{
-				if (device_extension[i] == current_callback)
-				{
-					device_extension[i] = callback;
-				}
-			}
-			class_device_object = class_device_object->NextDevice;
-		}
-		hid_device_object = hid_device_object->AttachedDevice;
-	}
+	ObfDereferenceObject(driver_object);
 }
 
 extern "C" NTSYSCALLAPI NTSTATUS HalPrivateDispatchTable(void);
@@ -784,18 +611,9 @@ BOOLEAN hooks::install(void)
 	//
 	// mouse hook
 	//
-	input::mouclass_routine = get_mouse_callback_address(&input::mouclass, &input::mouhid);
-	if (input::mouclass_routine == 0)
-		return 0;
-
-	update_mouse_devices(input::mouclass_routine, (QWORD)input::MouseClassServiceCallbackHook, input::mouclass, input::mouhid);
-
-
+	get_mouse_class_address(&input::mouclass);
 	input::oMouseClassRead = input::mouclass->MajorFunction[IRP_MJ_READ];
 	input::mouclass->MajorFunction[IRP_MJ_READ] = input::MouseClassReadHook;
-
-	input::oMouseAddDevice = input::mouclass->DriverExtension->AddDevice;
-	input::mouclass->DriverExtension->AddDevice = input::MouseAddDeviceHook;
 
 
 	//
@@ -805,9 +623,7 @@ BOOLEAN hooks::install(void)
 	if (exception::KdpDebugRoutineSelect == 0)
 	{
 	E0:
-		update_mouse_devices((QWORD)input::MouseClassServiceCallbackHook, input::mouclass_routine, input::mouclass, input::mouhid);
 		input::mouclass->MajorFunction[IRP_MJ_READ] = input::oMouseClassRead;
-		input::mouclass->DriverExtension->AddDevice = input::oMouseAddDevice;
 		return 0;
 	}
 
@@ -889,10 +705,7 @@ void hooks::uninstall(void)
 	//
 	// unhook mouse
 	//
-	update_mouse_devices((QWORD)input::MouseClassServiceCallbackHook, input::mouclass_routine, input::mouclass, input::mouhid);
-
 	input::mouclass->MajorFunction[IRP_MJ_READ] = input::oMouseClassRead;
-	input::mouclass->DriverExtension->AddDevice = input::oMouseAddDevice;
 
 	//
 	// unhook exceptions
