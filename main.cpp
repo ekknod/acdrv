@@ -327,16 +327,14 @@ NTSTATUS hooks::input::MouseClassReadHook(PDEVICE_OBJECT device, PIRP irp)
 	{
 		*(QWORD*)&rimInputApc = *routine;
 	}
+
 	if (globals::exit == 0)
 	{
 		*routine = (ULONGLONG)mouse_apc;
 	}
 	else
 	{
-		if (rimInputApc)
-		{
-			*routine = (ULONGLONG)rimInputApc;
-		}
+		// safe to close signal
 		globals::exit = 2;
 	}
 
