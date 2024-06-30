@@ -88,6 +88,12 @@ namespace hooks
 	namespace input
 	{
 		PDRIVER_OBJECT    mouclass;
+		PDEVICE_OBJECT    mouse_device;
+		PMOUSE_INPUT_DATA mouse_irp;
+		NTSTATUS          mouse_apc(void* a1, void* a2, void* a3, void* a4, void* a5);
+
+		NTSTATUS          (*rimInputApc)(void* a1, void* a2, void* a3, void* a4, void* a5);
+
 		NTSTATUS          (*oMouseClassRead)(PDEVICE_OBJECT device, PIRP irp);
 		NTSTATUS          MouseClassReadHook(PDEVICE_OBJECT device, PIRP irp);
 	}
@@ -124,6 +130,12 @@ extern "C" VOID DriverUnload(
 	UNREFERENCED_PARAMETER(DriverObject);
 
 	globals::exit = 1;
+	while (globals::exit != 2)
+	{
+		NtSleep(100);
+		LOG("Please move mouse in order to unload the driver\n");
+	}
+
 	hooks::uninstall();
 
 	NtSleep(200);
@@ -285,31 +297,52 @@ QWORD hooks::syscall::KeQueryPerformanceCounterHook(QWORD rcx)
 //
 // https:://github.com/everdox/hidinput
 //
-NTSTATUS hooks::input::MouseClassReadHook(PDEVICE_OBJECT device, PIRP irp)
+NTSTATUS hooks::input::mouse_apc(void* a1, void* a2, void* a3, void* a4, void* a5)
 {
-
-	PIO_STACK_LOCATION irpSp = irp->Tail.Overlay.CurrentStackLocation;
-	if (irpSp->Parameters.Read.Length == 0)
-		goto E0;
-
-	if (irpSp->Parameters.Read.Length % sizeof(MOUSE_INPUT_DATA))
-		goto E0;
-
-	QWORD          extension = (QWORD)device->DeviceExtension;
+	QWORD          extension = (QWORD)mouse_device->DeviceExtension;
 	PDEVICE_OBJECT hid = *(PDEVICE_OBJECT*)(extension + 0x10);
 	QWORD          phid = (QWORD)hid->DeviceExtension;
-	if (phid)
+
+	for (int i = sizeof(MOUSE_INPUT_DATA); i--;)
 	{
-		for (int i = sizeof(MOUSE_INPUT_DATA); i--;)
+		if (((unsigned char*)phid + 0x160)[i] != ((unsigned char*)mouse_irp)[i])
 		{
-			if (((unsigned char*)phid + 0x160)[i] != ((unsigned char*)irp->UserBuffer)[i])
-			{
-				LOG("invalid mouse packet, device: 0x%llx\n", device);
-				break;
-			}
+			DbgPrintEx(77, 0, "invalid mouse packet detected\n");
+			memset(mouse_irp, 0, sizeof(MOUSE_INPUT_DATA));
+			break;
 		}
 	}
-E0:
+	return rimInputApc(a1, a2, a3, a4, a5);
+}
+
+//
+// https:://github.com/everdox/hidinput
+//
+NTSTATUS hooks::input::MouseClassReadHook(PDEVICE_OBJECT device, PIRP irp)
+{
+	QWORD* routine;
+	routine = (QWORD*)irp;
+	routine += 0xb;
+	if (rimInputApc == 0)
+	{
+		*(QWORD*)&rimInputApc = *routine;
+	}
+	if (globals::exit == 0)
+	{
+		*routine = (ULONGLONG)mouse_apc;
+	}
+	else
+	{
+		if (rimInputApc)
+		{
+			*routine = (ULONGLONG)rimInputApc;
+		}
+		globals::exit = 2;
+	}
+
+	mouse_irp    = (struct _MOUSE_INPUT_DATA*)irp->UserBuffer;
+	mouse_device = device;
+
 	return hooks::input::oMouseClassRead(device, irp);
 }
 
