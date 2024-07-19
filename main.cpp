@@ -295,6 +295,19 @@ QWORD hooks::syscall::KeQueryPerformanceCounterHook(QWORD rcx)
 }
 
 //
+// HEY THIS IS JUST LAZY DEMO written in 5mins; do not ever write code like this
+//
+// ---------------------------------------------------------------------------------
+typedef struct {
+	QWORD device_object;
+	QWORD timestamp;
+} DEVICE_INFO;
+QWORD SDL_GetTicksNS(void);
+//
+// ---------------------------------------------------------------------------------
+//
+
+//
 // https:://github.com/everdox/hidinput
 //
 NTSTATUS hooks::input::mouse_apc(void* a1, void* a2, void* a3, void* a4, void* a5)
@@ -312,6 +325,31 @@ NTSTATUS hooks::input::mouse_apc(void* a1, void* a2, void* a3, void* a4, void* a
 			break;
 		}
 	}
+
+
+	//
+	// HEY THIS IS JUST LAZY DEMO written in 5mins; do not ever write code like this
+	//
+	// ---------------------------------------------------------------------------------
+	static DEVICE_INFO dev{};
+	if (dev.device_object == 0 || dev.device_object != (QWORD)hid)
+	{
+		dev.device_object = (QWORD)hid;
+		dev.timestamp     = SDL_GetTicksNS();
+		return rimInputApc(a1, a2, a3, a4, a5);
+	}
+
+	QWORD timestamp = SDL_GetTicksNS();
+	if (timestamp - dev.timestamp < 500000) // if latency is less than 500000  ns (2000 Hz). tested with 1000hz mice.
+	{
+		LOG("Device: 0x%llx, timestamp: %lld, delta: [%lld]\n", (QWORD)hid, timestamp, timestamp - dev.timestamp);
+	}
+
+	dev.timestamp = timestamp;
+	//
+	// ---------------------------------------------------------------------------------
+	//
+
 	return rimInputApc(a1, a2, a3, a4, a5);
 }
 
@@ -951,5 +989,43 @@ NTSTATUS ApplyTraceSettings(_In_ TRACE_OPERATION Operation)
 	ExFreePoolWithTag(Property, POOLTAG);
 
 	return Status;
+}
+
+QWORD SDL_GetPerformanceCounter(void)
+{
+	LARGE_INTEGER counter;
+	return KeQueryPerformanceCounter(&counter).QuadPart;
+}
+
+
+QWORD SDL_GetPerformanceFrequency(void)
+{
+	LARGE_INTEGER frequency;
+	KeQueryPerformanceCounter(&frequency);
+	return frequency.QuadPart;
+}
+
+DWORD CalculateGCD(DWORD a, DWORD b)
+{
+	if (b == 0) {
+		return a;
+	}
+	return CalculateGCD(b, (a % b));
+}
+
+QWORD SDL_GetTicksNS(void)
+{
+	QWORD starting_value, value;
+
+	static QWORD tick_start = SDL_GetPerformanceCounter();
+	static QWORD tick_freq = SDL_GetPerformanceFrequency();
+	static DWORD gcd = CalculateGCD(1000000000LL, (DWORD)tick_freq);
+	static QWORD tick_numerator_ns = (1000000000LL / gcd);
+	static DWORD tick_denominator_ns = (DWORD)(tick_freq / gcd);
+
+	starting_value = (SDL_GetPerformanceCounter() - tick_start);
+	value = (starting_value * tick_numerator_ns);
+	value /= tick_denominator_ns;
+	return value;
 }
 
