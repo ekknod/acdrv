@@ -294,18 +294,11 @@ QWORD hooks::syscall::KeQueryPerformanceCounterHook(QWORD rcx)
 	return oKeQueryPerformanceCounter(rcx);
 }
 
-//
-// HEY THIS IS JUST LAZY DEMO written in 5mins; do not ever write code like this
-//
-// ---------------------------------------------------------------------------------
 typedef struct {
 	QWORD device_object;
 	QWORD timestamp;
 } DEVICE_INFO;
 QWORD SDL_GetTicksNS(void);
-//
-// ---------------------------------------------------------------------------------
-//
 
 //
 // https:://github.com/everdox/hidinput
@@ -316,19 +309,39 @@ NTSTATUS hooks::input::mouse_apc(void* a1, void* a2, void* a3, void* a4, void* a
 	PDEVICE_OBJECT hid = *(PDEVICE_OBJECT*)(extension + 0x10);
 	QWORD          phid = (QWORD)hid->DeviceExtension;
 
+	//
+	// check if there is invalid packets in queue
+	//
 	for (int i = sizeof(MOUSE_INPUT_DATA); i--;)
 	{
 		if (((unsigned char*)phid + 0x160)[i] != ((unsigned char*)mouse_irp)[i])
 		{
 			DbgPrintEx(77, 0, "invalid mouse packet detected\n");
 			memset(mouse_irp, 0, sizeof(MOUSE_INPUT_DATA));
+			return rimInputApc(a1, a2, a3, a4, a5);
+		}
+	}
+
+	//
+	// did someone inject empty :D
+	//
+	BOOLEAN empty = 1;
+	for (int i = 4; i < sizeof(MOUSE_INPUT_DATA); i++)
+	{
+		if (((BYTE*)mouse_irp)[i] != 0)
+		{
+			empty = 0;
 			break;
 		}
 	}
 
+	if (empty)
+	{
+		DbgPrintEx(77, 0, "empty mouse packet detected\n");
+	}
 
 	//
-	// HEY THIS IS JUST LAZY DEMO written in 5mins; do not ever write code like this
+	// do not ever write code like this. should be good enough for demo
 	//
 	// ---------------------------------------------------------------------------------
 	static DEVICE_INFO dev{};
