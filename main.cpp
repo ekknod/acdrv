@@ -4,6 +4,11 @@
 #include <intrin.h>
 #include "img.h"
 
+extern "C"
+{
+	int _fltused;
+}
+
 //
 // features:
 // - exception hook
@@ -300,6 +305,8 @@ typedef struct {
 } DEVICE_INFO;
 QWORD SDL_GetTicksNS(void);
 
+double ns_to_herz(double ns) { return 1.0 / (ns / 1e9);  }
+
 //
 // https:://github.com/everdox/hidinput
 //
@@ -355,7 +362,11 @@ NTSTATUS hooks::input::mouse_apc(void* a1, void* a2, void* a3, void* a4, void* a
 	QWORD timestamp = SDL_GetTicksNS();
 	if (timestamp - dev.timestamp < 500000) // if latency is less than 500000  ns (2000 Hz). tested with 1000hz mice.
 	{
-		LOG("Device: 0x%llx, timestamp: %lld, delta: [%lld]\n", (QWORD)hid, timestamp, timestamp - dev.timestamp);
+		//
+		// https://www.unitjuggler.com/convert-frequency-from-Hz-to-ns(p).html?val=2000
+		//
+		LOG("Device: 0x%llx, timestamp: %lld, hz: [%lld]\n",
+			(QWORD)hid, timestamp, (QWORD)ns_to_herz( (double)(timestamp - dev.timestamp) ));
 	}
 
 	dev.timestamp = timestamp;
