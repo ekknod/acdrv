@@ -360,7 +360,7 @@ NTSTATUS hooks::input::mouse_apc(void* a1, void* a2, void* a3, void* a4, void* a
 	}
 
 	QWORD timestamp = SDL_GetTicksNS();
-	if (timestamp - dev.timestamp < 500000) // if latency is less than 500000  ns (2000 Hz). tested with 1000hz mice.
+	if (timestamp - dev.timestamp < 222222) // if latency is less than 222222  ns (4500 Hz)
 	{
 		//
 		// https://www.unitjuggler.com/convert-frequency-from-Hz-to-ns(p).html?val=2000
