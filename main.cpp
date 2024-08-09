@@ -93,6 +93,7 @@ namespace hooks
 	namespace input
 	{
 		PDRIVER_OBJECT    mouclass;
+		PDRIVER_OBJECT    mouhid;
 		PDEVICE_OBJECT    mouse_device;
 		PMOUSE_INPUT_DATA mouse_irp;
 		NTSTATUS          mouse_apc(void* a1, void* a2, void* a3, void* a4, void* a5);
@@ -313,8 +314,16 @@ double ns_to_herz(double ns) { return 1.0 / (ns / 1e9);  }
 NTSTATUS hooks::input::mouse_apc(void* a1, void* a2, void* a3, void* a4, void* a5)
 {
 	QWORD          extension = (QWORD)mouse_device->DeviceExtension;
-	PDEVICE_OBJECT hid = *(PDEVICE_OBJECT*)(extension + 0x10);
-	QWORD          phid = (QWORD)hid->DeviceExtension;
+	PDEVICE_OBJECT hid       = *(PDEVICE_OBJECT*)(extension + 0x10);
+	QWORD          phid      = (QWORD)hid->DeviceExtension;
+
+	//
+	// skipping third party driver (razer,steelseries)
+	//
+	if (hid->DriverObject != mouhid)
+	{
+		return rimInputApc(a1, a2, a3, a4, a5);
+	}
 
 	//
 	// check if there is invalid packets in queue
@@ -602,7 +611,7 @@ ObReferenceObjectByName(
 );
 
 extern "C" NTSYSCALLAPI POBJECT_TYPE * IoDriverObjectType;
-void get_mouse_class_address(PDRIVER_OBJECT* mouclass)
+void get_mouse_class_address(PDRIVER_OBJECT* mouclass, PDRIVER_OBJECT* mouhid)
 {
 	UNICODE_STRING class_string;
 	RtlInitUnicodeString(&class_string, L"\\Driver\\MouClass");
@@ -612,6 +621,14 @@ void get_mouse_class_address(PDRIVER_OBJECT* mouclass)
 
 	if (mouclass)
 		*mouclass = driver_object;
+
+	ObfDereferenceObject(driver_object);
+
+	RtlInitUnicodeString(&class_string, L"\\Driver\\MouHid");
+	ObReferenceObjectByName(&class_string, OBJ_CASE_INSENSITIVE, 0, 0, *IoDriverObjectType, KernelMode, 0, (PVOID*)&driver_object);
+
+	if (mouhid)
+		*mouhid = driver_object;
 
 	ObfDereferenceObject(driver_object);
 }
@@ -706,7 +723,7 @@ BOOLEAN hooks::install(void)
 	//
 	// mouse hook
 	//
-	get_mouse_class_address(&input::mouclass);
+	get_mouse_class_address(&input::mouclass, &input::mouhid);
 	input::oMouseClassRead = input::mouclass->MajorFunction[IRP_MJ_READ];
 	input::mouclass->MajorFunction[IRP_MJ_READ] = input::MouseClassReadHook;
 
