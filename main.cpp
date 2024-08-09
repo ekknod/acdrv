@@ -318,11 +318,21 @@ NTSTATUS hooks::input::mouse_apc(void* a1, void* a2, void* a3, void* a4, void* a
 	QWORD          phid      = (QWORD)hid->DeviceExtension;
 
 	//
-	// skipping third party driver (razer,steelseries)
+	// third party driver (razer,steelseries) filtering
 	//
+	BOOLEAN msdrv=1;
 	if (hid->DriverObject != mouhid)
 	{
-		return rimInputApc(a1, a2, a3, a4, a5);
+		hid = hid->DeviceObjectExtension->AttachedTo;
+
+		if (hid->DriverObject != mouhid)
+		{
+			return rimInputApc(a1, a2, a3, a4, a5);
+		}
+
+		phid = (QWORD)hid->DeviceExtension;
+
+		msdrv = 0;
 	}
 
 	//
@@ -351,7 +361,7 @@ NTSTATUS hooks::input::mouse_apc(void* a1, void* a2, void* a3, void* a4, void* a
 		}
 	}
 
-	if (empty)
+	if (empty && msdrv)
 	{
 		DbgPrintEx(77, 0, "empty mouse packet detected\n");
 	}
