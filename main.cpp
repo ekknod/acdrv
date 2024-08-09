@@ -351,6 +351,9 @@ NTSTATUS hooks::input::mouse_apc(void* a1, void* a2, void* a3, void* a4, void* a
 	//
 	// did someone inject empty :D
 	//
+	// steelseries mouse driver can cause false positive
+	//
+	/*
 	BOOLEAN empty = 1;
 	for (int i = 4; i < sizeof(MOUSE_INPUT_DATA); i++)
 	{
@@ -361,10 +364,11 @@ NTSTATUS hooks::input::mouse_apc(void* a1, void* a2, void* a3, void* a4, void* a
 		}
 	}
 
-	if (empty && msdrv)
+	if (empty)
 	{
 		DbgPrintEx(77, 0, "empty mouse packet detected\n");
 	}
+	*/
 
 	//
 	// do not ever write code like this. should be good enough for demo
@@ -379,10 +383,10 @@ NTSTATUS hooks::input::mouse_apc(void* a1, void* a2, void* a3, void* a4, void* a
 	}
 
 	QWORD timestamp = SDL_GetTicksNS();
-	if (timestamp - dev.timestamp < 222222) // if latency is less than 222222  ns (4500 Hz)
+	if (timestamp - dev.timestamp < 117647) // if latency is less than 117647  ns (8500 Hz)
 	{
 		//
-		// https://www.unitjuggler.com/convert-frequency-from-Hz-to-ns(p).html?val=2000
+		// https://www.unitjuggler.com/convert-frequency-from-Hz-to-ns(p).html?val=8500
 		//
 		LOG("Device: 0x%llx, timestamp: %lld, hz: [%lld]\n",
 			(QWORD)hid, timestamp, (QWORD)ns_to_herz( (double)(timestamp - dev.timestamp) ));
