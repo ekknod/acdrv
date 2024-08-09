@@ -325,7 +325,7 @@ NTSTATUS hooks::input::mouse_apc(void* a1, void* a2, void* a3, void* a4, void* a
 	{
 		hid = hid->DeviceObjectExtension->AttachedTo;
 
-		if (hid->DriverObject != mouhid)
+		if (hid == 0 || hid->DriverObject != mouhid)
 		{
 			return rimInputApc(a1, a2, a3, a4, a5);
 		}
