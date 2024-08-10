@@ -375,26 +375,7 @@ NTSTATUS hooks::input::mouse_apc(void* a1, void* a2, void* a3, void* a4, void* a
 	}
 
 resolved:
-
 	QWORD hid_extension = (QWORD)mouse->DeviceExtension;
-
-	//
-	// third party driver (razer,steelseries) filtering
-	//
-	BOOLEAN msdrv=1;
-	if (mouse->DriverObject != mouhid)
-	{
-		mouse = mouse->DeviceObjectExtension->AttachedTo;
-
-		if (mouse == 0 || mouse->DriverObject != mouhid)
-		{
-			return rimInputApc(a1, a2, a3, a4, a5);
-		}
-
-		hid_extension = (QWORD)mouse->DeviceExtension;
-
-		msdrv = 0;
-	}
 
 	//
 	// check if there is invalid packets in queue
@@ -487,8 +468,11 @@ NTSTATUS hooks::input::MouseClassReadHook(PDEVICE_OBJECT device, PIRP irp)
 	}
 
 	mouse_irp        = (struct _MOUSE_INPUT_DATA*)irp->UserBuffer;
-	mouse_hid_device = *(PDEVICE_OBJECT*)((QWORD)device->DeviceExtension + 0x10);
-
+	mouse_hid_device = device->DeviceObjectExtension->AttachedTo;
+	while (mouse_hid_device->DriverObject != mouhid)
+	{
+		mouse_hid_device = mouse_hid_device->DeviceObjectExtension->AttachedTo;
+	}
 	return hooks::input::oMouseClassRead(device, irp);
 }
 
