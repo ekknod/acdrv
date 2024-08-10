@@ -463,15 +463,7 @@ NTSTATUS hooks::input::MouseClassReadHook(PDEVICE_OBJECT device, PIRP irp)
 		// safe to close signal
 		globals::exit = 2;
 	}
-
-	PDEVICE_OBJECT tmp = device->DeviceObjectExtension->AttachedTo;
-	while (tmp->DriverObject != mouhid)
-	{
-		tmp = tmp->DeviceObjectExtension->AttachedTo;
-	}
-
-	mouse_irp        = (struct _MOUSE_INPUT_DATA*)irp->UserBuffer;
-
+	mouse_irp = (struct _MOUSE_INPUT_DATA*)irp->UserBuffer;
 	return hooks::input::oMouseClassRead(device, irp);
 }
 
