@@ -331,44 +331,27 @@ double ns_to_herz(double ns) { return 1.0 / (ns / 1e9);  }
 //
 NTSTATUS hooks::input::mouse_apc(void* a1, void* a2, void* a3, void* a4, void* a5)
 {
-	PDEVICE_OBJECT    mouse = 0;
-	PMOUSE_INPUT_DATA input = mouse_irp;
-	//
-	// race condition
-	// --------------------------------------------------------------------
-	//
-	if (a1 > input)
-	{
-		if (!apc_offset)
-			return rimInputApc(a1, a2, a3, a4, a5);
-		input = (PMOUSE_INPUT_DATA)((QWORD)a1 + apc_offset);
-		goto resolved;
-	}
-
-	if (((QWORD)a1 + 0x1000) < (QWORD)input)
-	{
-		if (!apc_offset)
-			return rimInputApc(a1, a2, a3, a4, a5);
-		input = (PMOUSE_INPUT_DATA)((QWORD)a1 + apc_offset);
-		goto resolved;
-	}
-	//
-	// --------------------------------------------------------------------
-	//
-
 	if (!apc_offset)
 	{
-		apc_offset = (QWORD)input - (QWORD)a1;
+		if (a1 > mouse_irp)
+		{
+			return rimInputApc(a1, a2, a3, a4, a5);
+		}
+		if (((QWORD)a1 + 0x1000) < (QWORD)mouse_irp)
+		{
+			return rimInputApc(a1, a2, a3, a4, a5);
+		}
+		apc_offset = (QWORD)mouse_irp - (QWORD)a1;
 	}
 
-resolved:
-	mouse = get_mouse_by_unit(input->UnitId);
+	PMOUSE_INPUT_DATA input = (PMOUSE_INPUT_DATA)((QWORD)a1 + apc_offset);
+	PDEVICE_OBJECT    mouse = get_mouse_by_unit(input->UnitId);
 	if (!mouse)
 	{
+		LOG("invalid UnitID, timestamp: %lld\n", SDL_GetTicksNS());
 		input->ButtonFlags = 0;
 		input->LastX       = 0;
 		input->LastY       = 0;
-		LOG("invalid UnitID, timestamp: %lld\n", SDL_GetTicksNS());
 		return rimInputApc(a1, a2, a3, a4, a5);
 	}
 
@@ -437,7 +420,6 @@ resolved:
 	//
 	// ---------------------------------------------------------------------------------
 	//
-
 	return rimInputApc(a1, a2, a3, a4, a5);
 }
 
