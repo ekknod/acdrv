@@ -94,7 +94,6 @@ namespace hooks
 	{
 		PDRIVER_OBJECT    mouclass;
 		PDRIVER_OBJECT    mouhid;
-		PMOUSE_INPUT_DATA mouse_irp;
 		QWORD             apc_offset;
 
 		PDEVICE_OBJECT    get_mouse_by_unit(WORD unit_id);
@@ -331,17 +330,15 @@ double ns_to_herz(double ns) { return 1.0 / (ns / 1e9);  }
 //
 NTSTATUS hooks::input::mouse_apc(void* a1, void* a2, void* a3, void* a4, void* a5)
 {
+	//
+	// tested win11 23h2 / win10 22h2
+	//
 	if (!apc_offset)
 	{
-		if (a1 > mouse_irp)
-		{
-			return rimInputApc(a1, a2, a3, a4, a5);
-		}
-		if (((QWORD)a1 + 0x1000) < (QWORD)mouse_irp)
-		{
-			return rimInputApc(a1, a2, a3, a4, a5);
-		}
-		apc_offset = (QWORD)mouse_irp - (QWORD)a1;
+		QWORD tmp = (QWORD)a2 + 0x10;
+		while (*(QWORD*)(tmp) != 0x200000000) tmp ++;
+		tmp += 0x08;
+		apc_offset = tmp - (QWORD)a1;
 	}
 
 	PMOUSE_INPUT_DATA input = (PMOUSE_INPUT_DATA)((QWORD)a1 + apc_offset);
@@ -381,7 +378,7 @@ NTSTATUS hooks::input::mouse_apc(void* a1, void* a2, void* a3, void* a4, void* a
 	BOOLEAN empty = 1;
 	for (int i = 4; i < sizeof(MOUSE_INPUT_DATA); i++)
 	{
-		if (((BYTE*)mouse_irp)[i] != 0)
+		if (((BYTE*)input)[i] != 0)
 		{
 			empty = 0;
 			break;
@@ -445,7 +442,6 @@ NTSTATUS hooks::input::MouseClassReadHook(PDEVICE_OBJECT device, PIRP irp)
 		// safe to close signal
 		globals::exit = 2;
 	}
-	mouse_irp = (struct _MOUSE_INPUT_DATA*)irp->UserBuffer;
 	return hooks::input::oMouseClassRead(device, irp);
 }
 
