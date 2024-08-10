@@ -96,8 +96,10 @@ namespace hooks
 		PDRIVER_OBJECT    mouhid;
 		PDEVICE_OBJECT    mouse_device;
 		PMOUSE_INPUT_DATA mouse_irp;
-		NTSTATUS          mouse_apc(void* a1, void* a2, void* a3, void* a4, void* a5);
+		QWORD             apc_offset;
 
+		PDEVICE_OBJECT    get_mouse_by_unit(WORD unit_id);
+		NTSTATUS          mouse_apc(void* a1, void* a2, void* a3, void* a4, void* a5);
 		NTSTATUS          (*rimInputApc)(void* a1, void* a2, void* a3, void* a4, void* a5);
 
 		NTSTATUS          (*oMouseClassRead)(PDEVICE_OBJECT device, PIRP irp);
@@ -300,6 +302,23 @@ QWORD hooks::syscall::KeQueryPerformanceCounterHook(QWORD rcx)
 	return oKeQueryPerformanceCounter(rcx);
 }
 
+PDEVICE_OBJECT hooks::input::get_mouse_by_unit(WORD unit_id)
+{
+	PDEVICE_OBJECT hid_device_object = mouhid->DeviceObject;
+
+	while (hid_device_object)
+	{
+		QWORD             *ext  = (PULONG_PTR)hid_device_object->DeviceExtension;
+		PMOUSE_INPUT_DATA input = (PMOUSE_INPUT_DATA)&ext[0x2C];
+		if (input->UnitId == unit_id)
+		{
+			return hid_device_object;
+		}
+		hid_device_object = hid_device_object->NextDevice;
+	}
+	return 0;
+}
+
 typedef struct {
 	QWORD device_object;
 	QWORD timestamp;
@@ -313,25 +332,49 @@ double ns_to_herz(double ns) { return 1.0 / (ns / 1e9);  }
 //
 NTSTATUS hooks::input::mouse_apc(void* a1, void* a2, void* a3, void* a4, void* a5)
 {
-	PDEVICE_OBJECT    mouse     = mouse_device;
-	PMOUSE_INPUT_DATA input     = mouse_irp;
-
+	PDEVICE_OBJECT    mouse = mouse_device;
+	PMOUSE_INPUT_DATA input = mouse_irp;
 	//
 	// race condition
 	// --------------------------------------------------------------------
 	//
 	if (a1 > input)
 	{
-		return rimInputApc(a1, a2, a3, a4, a5);
+		if (!apc_offset)
+			return rimInputApc(a1, a2, a3, a4, a5);
+
+		input = (PMOUSE_INPUT_DATA)((QWORD)a1 + apc_offset);
+		mouse = get_mouse_by_unit(input->UnitId);
+
+		if (!mouse)
+			return rimInputApc(a1, a2, a3, a4, a5);
+
+		goto resolved;
 	}
 
 	if (((QWORD)a1 + 0x1000) < (QWORD)input)
 	{
-		return rimInputApc(a1, a2, a3, a4, a5);
+		if (!apc_offset)
+			return rimInputApc(a1, a2, a3, a4, a5);
+
+		input = (PMOUSE_INPUT_DATA)((QWORD)a1 + apc_offset);
+		mouse = get_mouse_by_unit(input->UnitId);
+
+		if (!mouse)
+			return rimInputApc(a1, a2, a3, a4, a5);
+
+		goto resolved;
 	}
 	//
 	// --------------------------------------------------------------------
 	//
+
+	if (!apc_offset)
+	{
+		apc_offset = (QWORD)input - (QWORD)a1;
+	}
+
+resolved:
 
 	QWORD          extension    = (QWORD)mouse->DeviceExtension;
 	PDEVICE_OBJECT hid          = *(PDEVICE_OBJECT*)(extension + 0x10);
