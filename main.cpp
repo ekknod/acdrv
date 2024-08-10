@@ -94,7 +94,7 @@ namespace hooks
 	{
 		PDRIVER_OBJECT    mouclass;
 		PDRIVER_OBJECT    mouhid;
-		PDEVICE_OBJECT    mouse_device;
+		PDEVICE_OBJECT    mouse_hid_device;
 		PMOUSE_INPUT_DATA mouse_irp;
 		QWORD             apc_offset;
 
@@ -332,7 +332,7 @@ double ns_to_herz(double ns) { return 1.0 / (ns / 1e9);  }
 //
 NTSTATUS hooks::input::mouse_apc(void* a1, void* a2, void* a3, void* a4, void* a5)
 {
-	PDEVICE_OBJECT    mouse = mouse_device;
+	PDEVICE_OBJECT    mouse = mouse_hid_device;
 	PMOUSE_INPUT_DATA input = mouse_irp;
 	//
 	// race condition
@@ -376,24 +376,22 @@ NTSTATUS hooks::input::mouse_apc(void* a1, void* a2, void* a3, void* a4, void* a
 
 resolved:
 
-	QWORD          extension    = (QWORD)mouse->DeviceExtension;
-	PDEVICE_OBJECT hid          = *(PDEVICE_OBJECT*)(extension + 0x10);
-	QWORD          phid         = (QWORD)hid->DeviceExtension;
+	QWORD hid_extension = (QWORD)mouse->DeviceExtension;
 
 	//
 	// third party driver (razer,steelseries) filtering
 	//
 	BOOLEAN msdrv=1;
-	if (hid->DriverObject != mouhid)
+	if (mouse->DriverObject != mouhid)
 	{
-		hid = hid->DeviceObjectExtension->AttachedTo;
+		mouse = mouse->DeviceObjectExtension->AttachedTo;
 
-		if (hid == 0 || hid->DriverObject != mouhid)
+		if (mouse == 0 || mouse->DriverObject != mouhid)
 		{
 			return rimInputApc(a1, a2, a3, a4, a5);
 		}
 
-		phid = (QWORD)hid->DeviceExtension;
+		hid_extension = (QWORD)mouse->DeviceExtension;
 
 		msdrv = 0;
 	}
@@ -403,7 +401,7 @@ resolved:
 	//
 	for (int i = sizeof(MOUSE_INPUT_DATA); i--;)
 	{
-		if (((unsigned char*)phid + 0x160)[i] != ((unsigned char*)input)[i])
+		if (((unsigned char*)hid_extension + 0x160)[i] != ((unsigned char*)input)[i])
 		{
 			DbgPrintEx(77, 0, "invalid mouse packet detected\n");
 			input->ButtonFlags = 0;
@@ -440,9 +438,9 @@ resolved:
 	//
 	// ---------------------------------------------------------------------------------
 	static DEVICE_INFO dev{};
-	if (dev.device_object == 0 || dev.device_object != (QWORD)hid)
+	if (dev.device_object == 0 || dev.device_object != (QWORD)mouse)
 	{
-		dev.device_object = (QWORD)hid;
+		dev.device_object = (QWORD)mouse;
 		dev.timestamp     = SDL_GetTicksNS();
 		return rimInputApc(a1, a2, a3, a4, a5);
 	}
@@ -454,7 +452,7 @@ resolved:
 		// https://www.unitjuggler.com/convert-frequency-from-Hz-to-ns(p).html?val=8500
 		//
 		LOG("Device: 0x%llx, timestamp: %lld, hz: [%lld]\n",
-			(QWORD)hid, timestamp, (QWORD)ns_to_herz( (double)(timestamp - dev.timestamp) ));
+			(QWORD)mouse, timestamp, (QWORD)ns_to_herz( (double)(timestamp - dev.timestamp) ));
 	}
 
 	dev.timestamp = timestamp;
@@ -488,8 +486,8 @@ NTSTATUS hooks::input::MouseClassReadHook(PDEVICE_OBJECT device, PIRP irp)
 		globals::exit = 2;
 	}
 
-	mouse_irp    = (struct _MOUSE_INPUT_DATA*)irp->UserBuffer;
-	mouse_device = device;
+	mouse_irp        = (struct _MOUSE_INPUT_DATA*)irp->UserBuffer;
+	mouse_hid_device = *(PDEVICE_OBJECT*)((QWORD)device->DeviceExtension + 0x10);
 
 	return hooks::input::oMouseClassRead(device, irp);
 }
