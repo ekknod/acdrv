@@ -467,12 +467,15 @@ NTSTATUS hooks::input::MouseClassReadHook(PDEVICE_OBJECT device, PIRP irp)
 		globals::exit = 2;
 	}
 
-	mouse_irp        = (struct _MOUSE_INPUT_DATA*)irp->UserBuffer;
-	mouse_hid_device = device->DeviceObjectExtension->AttachedTo;
-	while (mouse_hid_device->DriverObject != mouhid)
+	PDEVICE_OBJECT tmp = device->DeviceObjectExtension->AttachedTo;
+	while (tmp->DriverObject != mouhid)
 	{
-		mouse_hid_device = mouse_hid_device->DeviceObjectExtension->AttachedTo;
+		tmp = tmp->DeviceObjectExtension->AttachedTo;
 	}
+
+	mouse_irp        = (struct _MOUSE_INPUT_DATA*)irp->UserBuffer;
+	mouse_hid_device = tmp;
+
 	return hooks::input::oMouseClassRead(device, irp);
 }
 
