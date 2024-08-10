@@ -313,9 +313,29 @@ double ns_to_herz(double ns) { return 1.0 / (ns / 1e9);  }
 //
 NTSTATUS hooks::input::mouse_apc(void* a1, void* a2, void* a3, void* a4, void* a5)
 {
-	QWORD          extension = (QWORD)mouse_device->DeviceExtension;
-	PDEVICE_OBJECT hid       = *(PDEVICE_OBJECT*)(extension + 0x10);
-	QWORD          phid      = (QWORD)hid->DeviceExtension;
+	PDEVICE_OBJECT    mouse     = mouse_device;
+	PMOUSE_INPUT_DATA input     = mouse_irp;
+
+	//
+	// race condition
+	// --------------------------------------------------------------------
+	//
+	if (a1 > input)
+	{
+		return rimInputApc(a1, a2, a3, a4, a5);
+	}
+
+	if (((QWORD)a1 + 0x1000) < (QWORD)input)
+	{
+		return rimInputApc(a1, a2, a3, a4, a5);
+	}
+	//
+	// --------------------------------------------------------------------
+	//
+
+	QWORD          extension    = (QWORD)mouse->DeviceExtension;
+	PDEVICE_OBJECT hid          = *(PDEVICE_OBJECT*)(extension + 0x10);
+	QWORD          phid         = (QWORD)hid->DeviceExtension;
 
 	//
 	// third party driver (razer,steelseries) filtering
@@ -340,10 +360,12 @@ NTSTATUS hooks::input::mouse_apc(void* a1, void* a2, void* a3, void* a4, void* a
 	//
 	for (int i = sizeof(MOUSE_INPUT_DATA); i--;)
 	{
-		if (((unsigned char*)phid + 0x160)[i] != ((unsigned char*)mouse_irp)[i])
+		if (((unsigned char*)phid + 0x160)[i] != ((unsigned char*)input)[i])
 		{
 			DbgPrintEx(77, 0, "invalid mouse packet detected\n");
-			memset(mouse_irp, 0, sizeof(MOUSE_INPUT_DATA));
+			input->ButtonFlags = 0;
+			input->LastX       = 0;
+			input->LastY       = 0;
 			return rimInputApc(a1, a2, a3, a4, a5);
 		}
 	}
