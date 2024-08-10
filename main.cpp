@@ -94,7 +94,6 @@ namespace hooks
 	{
 		PDRIVER_OBJECT    mouclass;
 		PDRIVER_OBJECT    mouhid;
-		PDEVICE_OBJECT    mouse_hid_device;
 		PMOUSE_INPUT_DATA mouse_irp;
 		QWORD             apc_offset;
 
@@ -332,7 +331,7 @@ double ns_to_herz(double ns) { return 1.0 / (ns / 1e9);  }
 //
 NTSTATUS hooks::input::mouse_apc(void* a1, void* a2, void* a3, void* a4, void* a5)
 {
-	PDEVICE_OBJECT    mouse = mouse_hid_device;
+	PDEVICE_OBJECT    mouse = 0;
 	PMOUSE_INPUT_DATA input = mouse_irp;
 	//
 	// race condition
@@ -342,13 +341,7 @@ NTSTATUS hooks::input::mouse_apc(void* a1, void* a2, void* a3, void* a4, void* a
 	{
 		if (!apc_offset)
 			return rimInputApc(a1, a2, a3, a4, a5);
-
 		input = (PMOUSE_INPUT_DATA)((QWORD)a1 + apc_offset);
-		mouse = get_mouse_by_unit(input->UnitId);
-
-		if (!mouse)
-			return rimInputApc(a1, a2, a3, a4, a5);
-
 		goto resolved;
 	}
 
@@ -356,13 +349,7 @@ NTSTATUS hooks::input::mouse_apc(void* a1, void* a2, void* a3, void* a4, void* a
 	{
 		if (!apc_offset)
 			return rimInputApc(a1, a2, a3, a4, a5);
-
 		input = (PMOUSE_INPUT_DATA)((QWORD)a1 + apc_offset);
-		mouse = get_mouse_by_unit(input->UnitId);
-
-		if (!mouse)
-			return rimInputApc(a1, a2, a3, a4, a5);
-
 		goto resolved;
 	}
 	//
@@ -375,6 +362,16 @@ NTSTATUS hooks::input::mouse_apc(void* a1, void* a2, void* a3, void* a4, void* a
 	}
 
 resolved:
+	mouse = get_mouse_by_unit(input->UnitId);
+	if (!mouse)
+	{
+		input->ButtonFlags = 0;
+		input->LastX       = 0;
+		input->LastY       = 0;
+		LOG("invalid UnitID, timestamp: %lld\n", SDL_GetTicksNS());
+		return rimInputApc(a1, a2, a3, a4, a5);
+	}
+
 	QWORD hid_extension = (QWORD)mouse->DeviceExtension;
 
 	//
@@ -384,7 +381,7 @@ resolved:
 	{
 		if (((unsigned char*)hid_extension + 0x160)[i] != ((unsigned char*)input)[i])
 		{
-			DbgPrintEx(77, 0, "invalid mouse packet detected\n");
+			LOG("invalid mouse packet detected, timestamp: %lld\n", SDL_GetTicksNS());
 			input->ButtonFlags = 0;
 			input->LastX       = 0;
 			input->LastY       = 0;
@@ -474,7 +471,6 @@ NTSTATUS hooks::input::MouseClassReadHook(PDEVICE_OBJECT device, PIRP irp)
 	}
 
 	mouse_irp        = (struct _MOUSE_INPUT_DATA*)irp->UserBuffer;
-	mouse_hid_device = tmp;
 
 	return hooks::input::oMouseClassRead(device, irp);
 }
