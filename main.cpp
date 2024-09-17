@@ -4,6 +4,11 @@
 #include <intrin.h>
 #include "img.h"
 
+#pragma warning (disable: 4201)
+#pragma warning (disable: 4996)
+#include "ia32.hpp"
+
+
 extern "C"
 {
 	int _fltused;
@@ -25,6 +30,20 @@ typedef unsigned __int32 DWORD;
 typedef unsigned __int16 WORD;
 typedef unsigned __int8 BYTE;
 
+typedef union _virt_addr_t
+{
+	QWORD value;
+	struct
+	{
+		QWORD offset : 12;
+		QWORD pt_index : 9;
+		QWORD pd_index : 9;
+		QWORD pdpt_index : 9;
+		QWORD pml4_index : 9;
+		QWORD reserved : 16;
+	};
+} virt_addr_t, * pvirt_addr_t;
+
 #define LOG(...) DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "[driver.sys] " __VA_ARGS__)
 
 typedef struct
@@ -33,6 +52,7 @@ typedef struct
 } MODULE_INFO;
 
 MODULE_INFO get_module_info(PWCH module_name);
+PWCH get_module_name(QWORD address);
 void NtSleep(DWORD milliseconds)
 {
 	QWORD ms = milliseconds;
@@ -169,6 +189,22 @@ extern "C" NTSTATUS DriverEntry(
 	return STATUS_SUCCESS;
 }
 
+inline PVOID get_virtual_address(QWORD physical_address)
+{
+	return MmGetVirtualForPhysical( *(PHYSICAL_ADDRESS*)&physical_address ) ;
+}
+
+inline QWORD get_physical_address(PVOID virtual_address)
+{
+	return MmGetPhysicalAddress( virtual_address ).QuadPart;
+}
+
+namespace pagetable
+{
+	PVOID clone(QWORD cr3, PVOID *pml4, PVOID *pdpt, PVOID *pde);
+	void free(PVOID clone_cr3_virt);
+}
+
 NTSTATUS NTAPI hooks::efi::NtQuerySystemEnvironmentValueExHook(
 	PUNICODE_STRING VariableName,
 	LPGUID VendorGuid,
@@ -181,44 +217,198 @@ NTSTATUS NTAPI hooks::efi::NtQuerySystemEnvironmentValueExHook(
 	{
 		return STATUS_INVALID_PARAMETER_1;
 	}
-	//
-	// if someone has x86-x64 emulator with basic x86/x64 instruction set, feel free to commit
-	// 
-	// cpu::emulator(efi::oGetVariable, VariableName, VendorGuid, Attributes, DataSize, Data);
-	//
-	QWORD status = oGetVariable(VariableName->Buffer, VendorGuid, (DWORD*)Attributes, (QWORD*)ValueLength, Value);
-	if (status != 0)
+
+	virt_addr_t ntos;
+	pml4e_64* pml4;
+	pdpte_64* pdpt;
+	pde_64  * pde;
+
+	ntos.value           = globals::ntoskrnl.base;
+	QWORD process_cr3    = __readcr3();
+	PVOID clone_cr3_virt = pagetable::clone(process_cr3, (PVOID*)&pml4, (PVOID*)&pdpt, (PVOID*)&pde);
+
+	if (!clone_cr3_virt)
 	{
-		return STATUS_INVALID_PARAMETER;
+		return oGetVariable(VariableName->Buffer, VendorGuid, (DWORD*)Attributes, (QWORD*)ValueLength, Value) == 0 ?
+			STATUS_SUCCESS :
+			STATUS_INVALID_PARAMETER;
 	}
 
-	return STATUS_SUCCESS;
+	QWORD clone_cr3_phys = MmGetPhysicalAddress(clone_cr3_virt).QuadPart;
+
+
+	//
+	// disable interrupts
+	//
+	_disable();
+
+
+	//
+	// swap to cached table
+	//
+	__writecr3((QWORD)clone_cr3_phys);
+	uint64_t cr4 = __readcr4();
+	__writecr4(cr4 ^ 0x80);
+	__writecr4(cr4);
+
+
+	//
+	// call efi GetVariable
+	//
+	QWORD status = oGetVariable(VariableName->Buffer, VendorGuid, (DWORD*)Attributes, (QWORD*)ValueLength, Value);
+
+
+	//
+	// swap to original table
+	//
+	__writecr3((QWORD)process_cr3);
+	cr4 = __readcr4();
+	__writecr4(cr4 ^ 0x80);
+	__writecr4(cr4);
+
+
+	//
+	// enable interrupts
+	//
+	_enable();
+
+
+	//
+	// check accesses
+	//
+	for (int pde_index = 0; pde_index < 512; pde_index++)
+	{
+		if (!pde[pde_index].accessed)
+		{
+			continue;
+		}
+
+		virt_addr_t addr{};
+		addr.pml4_index = ntos.pml4_index;
+		addr.pdpt_index = ntos.pdpt_index;
+		addr.pd_index = pde_index;
+		addr.reserved = 0xFFFF;
+
+		PWCH kernel_module = get_module_name(addr.value);
+
+		if (!kernel_module)
+		{
+			continue;
+		}
+		/*
+		if (addr.value >= globals::ntoskrnl.base &&
+			addr.value <= globals::ntoskrnl.base + globals::ntoskrnl.size)*/
+		{
+			LOG("[GetVariableHook detected] %ws 0x%llx\n", kernel_module, addr.value);
+		}
+	}
+
+	pagetable::free(clone_cr3_virt);
+
+	return status == 0 ? STATUS_SUCCESS : STATUS_INVALID_PARAMETER;
 }
 
 NTSTATUS NTAPI hooks::efi::NtSetSystemEnvironmentValueExHook(
-    PUNICODE_STRING VariableName,
-    LPGUID VendorGuid,
-    PVOID Value,
-    ULONG ValueLength,
-    ULONG Attributes
-    )
+	PUNICODE_STRING VariableName,
+	LPGUID VendorGuid,
+	PVOID Value,
+	ULONG ValueLength,
+	ULONG Attributes
+)
 {
 	if (VariableName == 0 || VendorGuid == 0)
 	{
 		return STATUS_INVALID_PARAMETER_1;
 	}
-	//
-	// if someone has x86-x64 emulator with basic x86/x64 instruction set, feel free to commit
-	// 
-	// cpu::emulator(efi::oSetVariable, VariableName, VendorGuid, Attributes, DataSize, Data);
-	//
-	QWORD status = oSetVariable(VariableName->Buffer, VendorGuid, Attributes, ValueLength, Value);
-	if (status != 0)
+
+	virt_addr_t ntos;
+	pml4e_64* pml4;
+	pdpte_64* pdpt;
+	pde_64* pde;
+
+	ntos.value = globals::ntoskrnl.base;
+	QWORD process_cr3 = __readcr3();
+	PVOID clone_cr3_virt = pagetable::clone(process_cr3, (PVOID*)&pml4, (PVOID*)&pdpt, (PVOID*)&pde);
+
+	if (!clone_cr3_virt)
 	{
-		return STATUS_INVALID_PARAMETER;
+		return oSetVariable(VariableName->Buffer, VendorGuid, Attributes, ValueLength, Value) == 0 ?
+			STATUS_SUCCESS :
+			STATUS_INVALID_PARAMETER;
 	}
 
-	return STATUS_SUCCESS;
+	QWORD clone_cr3_phys = MmGetPhysicalAddress(clone_cr3_virt).QuadPart;
+
+
+	//
+	// disable interrupts
+	//
+	_disable();
+
+
+	//
+	// swap to cached table
+	//
+	__writecr3((QWORD)clone_cr3_phys);
+	uint64_t cr4 = __readcr4();
+	__writecr4(cr4 ^ 0x80);
+	__writecr4(cr4);
+
+
+	//
+	// call efi SetVariable
+	//
+	QWORD status = oSetVariable(VariableName->Buffer, VendorGuid, Attributes, ValueLength, Value);
+
+
+	//
+	// swap to original table
+	//
+	__writecr3((QWORD)process_cr3);
+	cr4 = __readcr4();
+	__writecr4(cr4 ^ 0x80);
+	__writecr4(cr4);
+
+
+	//
+	// enable interrupts
+	//
+	_enable();
+
+
+	//
+	// check accesses
+	//
+	for (int pde_index = 0; pde_index < 512; pde_index++)
+	{
+		if (!pde[pde_index].accessed)
+		{
+			continue;
+		}
+
+		virt_addr_t addr{};
+		addr.pml4_index = ntos.pml4_index;
+		addr.pdpt_index = ntos.pdpt_index;
+		addr.pd_index = pde_index;
+		addr.reserved = 0xFFFF;
+
+		PWCH kernel_module = get_module_name(addr.value);
+
+		if (!kernel_module)
+		{
+			continue;
+		}
+		/*
+		if (addr.value >= globals::ntoskrnl.base &&
+			addr.value <= globals::ntoskrnl.base + globals::ntoskrnl.size)*/
+		{
+			LOG("[SetVariableHook detected] %ws 0x%llx\n", kernel_module, addr.value);
+		}
+	}
+
+	pagetable::free(clone_cr3_virt);
+
+	return status == 0 ? STATUS_SUCCESS : STATUS_INVALID_PARAMETER;
 }
 
 void __fastcall hooks::syscall::SyscallStub(unsigned int SyscallIndex, void** SyscallFunction)
@@ -262,6 +452,7 @@ QWORD hooks::syscall::KeQueryPerformanceCounterHook(QWORD rcx)
 		{
 			continue;
 		}
+
 		// 
 		// If the first magic is set, check for the second magic.
 		//
@@ -286,11 +477,14 @@ QWORD hooks::syscall::KeQueryPerformanceCounterHook(QWORD rcx)
 			{
 				break;
 			}
-			if (!(PAGE_ALIGN(*AsUlonglong) >= (PVOID)syscall::SystemCallEntryPage &&
-				PAGE_ALIGN(*AsUlonglong) < (PVOID)((uintptr_t)syscall::SystemCallEntryPage + (PAGE_SIZE * 2))))
+
+			if (*AsUlonglong < syscall::SystemCallEntryPage ||
+				*AsUlonglong > syscall::SystemCallEntryPage + 0x1000
+				)
 			{
 				continue;
 			}
+
 			void** syscall = &StackCurrent[9];
 			SyscallStub(syscall_index, syscall);
 			break;
@@ -595,6 +789,37 @@ MODULE_INFO get_module_info(PWCH module_name)
 	return {};
 }
 
+PWCH get_module_name(QWORD address)
+{
+	PLDR_DATA_TABLE_ENTRY module_entry = CONTAINING_RECORD(PsLoadedModuleList, LDR_DATA_TABLE_ENTRY, InLoadOrderLinks);
+
+	if (address >= (QWORD)module_entry->ImageBase &&
+		address <= (QWORD)((QWORD)module_entry->ImageBase + module_entry->SizeOfImage)
+		)
+	{
+		return module_entry->BaseImageName.Buffer;
+	}
+
+	for (PLIST_ENTRY list_entry = PsLoadedModuleList->Flink; list_entry != PsLoadedModuleList; list_entry = list_entry->Flink)
+	{
+		module_entry = CONTAINING_RECORD(list_entry, LDR_DATA_TABLE_ENTRY, InLoadOrderLinks);
+		if (module_entry->ImageBase == 0)
+			continue;
+
+		if (module_entry->BaseImageName.Length == 0)
+			continue;
+
+		if (address >= (QWORD)module_entry->ImageBase &&
+			address <= (QWORD)((QWORD)module_entry->ImageBase + module_entry->SizeOfImage)
+			)
+		{
+			return module_entry->BaseImageName.Buffer;
+		}
+	}
+	return 0;
+}
+
+
 extern "C" __declspec(dllimport) LIST_ENTRY * PsLoadedModuleList;
 PCWSTR GetCallerModuleName(QWORD address, QWORD* offset)
 {
@@ -742,8 +967,8 @@ BOOLEAN hooks::install(void)
 	while (*(WORD*)temp != 0x8948) temp++;
 	temp = temp + 0x08;
 	temp = (temp + 7) + *(int*)(temp + 3);
-	temp = *(QWORD*)temp;
 
+	temp = *(QWORD*)temp;
 
 	*(QWORD*)&syscall::oKeQueryPerformanceCounter = *(QWORD*)(temp + 0x70);
 	*(QWORD*)(temp + 0x70) = (QWORD)syscall::KeQueryPerformanceCounterHook;
@@ -1098,5 +1323,81 @@ QWORD SDL_GetTicksNS(void)
 	value = (starting_value * tick_numerator_ns);
 	value /= tick_denominator_ns;
 	return value;
+}
+
+namespace pagetable
+{
+	PVOID clone(QWORD cr3, PVOID *pml4, PVOID *pdpt, PVOID *pde)
+	{
+		virt_addr_t ntos; ntos.value = globals::ntoskrnl.base;
+
+
+		PVOID cache_page_table = ExAllocatePool(NonPagedPool,
+			(0x1000 * 3)
+		);
+
+		//
+		// copy pml4
+		//
+		pml4e_64* current_pml4_virt = (pml4e_64*)get_virtual_address(
+			cr3
+		);
+		cache_page_table = (PVOID)((QWORD)cache_page_table + 0x0000);
+		pml4e_64* cache_pml4_virt = (pml4e_64*)cache_page_table;
+		memcpy(cache_pml4_virt, current_pml4_virt, 0x1000);
+
+
+		//
+		// copy pdpte
+		//
+		pdpte_64* current_pdpt_virt = (pdpte_64*)get_virtual_address(
+			cache_pml4_virt[ntos.pml4_index].page_frame_number << PAGE_SHIFT
+		);
+		cache_page_table = (PVOID)((QWORD)cache_page_table + 0x1000);
+		pdpte_64* cache_pdpt_virt = (pdpte_64*)cache_page_table;
+		memcpy(cache_pdpt_virt, current_pdpt_virt, 0x1000);
+
+
+		//
+		// copy pde
+		//
+		pde_64* current_pde_virt = (pde_64*)get_virtual_address(
+			cache_pdpt_virt[ntos.pdpt_index].page_frame_number << PAGE_SHIFT
+		);
+		cache_page_table = (PVOID)((QWORD)cache_page_table + 0x1000);
+		pde_64* cache_pde_virt = (pde_64*)cache_page_table;
+		memcpy(cache_pde_virt, current_pde_virt, 0x1000);
+
+
+		//
+		// connect tables
+		//
+		cache_pml4_virt[ntos.pml4_index].page_frame_number =
+			get_physical_address(cache_pdpt_virt) >> PAGE_SHIFT;
+
+		cache_pdpt_virt[ntos.pdpt_index].page_frame_number =
+			get_physical_address(cache_pde_virt) >> PAGE_SHIFT;
+
+		//
+		// clear accessed bits
+		//
+		for (int i = 0; i < 512; i++)
+		{
+			cache_pml4_virt[i].accessed = 0;
+			cache_pdpt_virt[i].accessed = 0;
+			cache_pde_virt[i].accessed = 0;
+		}
+
+		*pml4 = cache_pml4_virt;
+		*pdpt = cache_pdpt_virt;
+		*pde  = cache_pde_virt;
+
+		return cache_pml4_virt;
+	}
+
+	void free(PVOID clone_cr3_virt)
+	{
+		ExFreePool(clone_cr3_virt);
+	}
 }
 
