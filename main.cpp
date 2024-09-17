@@ -205,6 +205,42 @@ namespace pagetable
 	void free(PVOID clone_cr3_virt);
 }
 
+//
+// interrupt work done by Erik3000
+// https://www.unknowncheats.me/forum/anti-cheat-bypass/658736-universal-ac-bypass.html
+//
+namespace interrupts
+{
+	PVOID clone(void);
+
+	void hook(PVOID idt_table, int index, PVOID handler);
+
+
+	void enable(PVOID idt_table);
+	void disable(PVOID idt_table);
+
+	PVOID get_original_address(int index);
+	void unhook(PVOID idt_table, int index);
+
+	void free(PVOID clone_interrupt_table);
+}
+
+extern "C"
+{
+PVOID nmi_handler_original;
+}
+extern "C" void __fastcall nmi_handler()
+{
+	nmi_handler_original = interrupts::get_original_address(exception_vector::nmi);
+
+	//
+	// write original page table back
+	//
+	__writecr3( *(QWORD*)((QWORD)PsGetCurrentProcess() + 0x28) );
+}
+
+extern "C" void asm_nmi_handler(void); // calls nmi_handler, and jumps back to nmi_handler_original
+
 NTSTATUS NTAPI hooks::efi::NtQuerySystemEnvironmentValueExHook(
 	PUNICODE_STRING VariableName,
 	LPGUID VendorGuid,
@@ -244,6 +280,14 @@ NTSTATUS NTAPI hooks::efi::NtQuerySystemEnvironmentValueExHook(
 
 
 	//
+	// hook interrupts
+	//
+	PVOID idt_table = interrupts::clone();
+	interrupts::hook(idt_table, exception_vector::nmi, asm_nmi_handler);
+	interrupts::enable(idt_table);
+
+
+	//
 	// swap to cached table
 	//
 	__writecr3((QWORD)clone_cr3_phys);
@@ -261,10 +305,22 @@ NTSTATUS NTAPI hooks::efi::NtQuerySystemEnvironmentValueExHook(
 	//
 	// swap to original table
 	//
-	__writecr3((QWORD)process_cr3);
-	cr4 = __readcr4();
-	__writecr4(cr4 ^ 0x80);
-	__writecr4(cr4);
+	BOOLEAN swap_cr3 = 0;
+	if (__readcr3() != process_cr3)
+	{
+		__writecr3((QWORD)process_cr3);
+		cr4 = __readcr4();
+		__writecr4(cr4 ^ 0x80);
+		__writecr4(cr4);
+		swap_cr3 = 1;
+	}
+
+
+	//
+	// return original idt
+	//
+	interrupts::disable(idt_table);
+	interrupts::free(idt_table);
 
 
 	//
@@ -276,30 +332,33 @@ NTSTATUS NTAPI hooks::efi::NtQuerySystemEnvironmentValueExHook(
 	//
 	// check accesses
 	//
-	for (int pde_index = 0; pde_index < 512; pde_index++)
+	if (swap_cr3)
 	{
-		if (!pde[pde_index].accessed)
+		for (int pde_index = 0; pde_index < 512; pde_index++)
 		{
-			continue;
-		}
+			if (!pde[pde_index].accessed)
+			{
+				continue;
+			}
 
-		virt_addr_t addr{};
-		addr.pml4_index = ntos.pml4_index;
-		addr.pdpt_index = ntos.pdpt_index;
-		addr.pd_index = pde_index;
-		addr.reserved = 0xFFFF;
+			virt_addr_t addr{};
+			addr.pml4_index = ntos.pml4_index;
+			addr.pdpt_index = ntos.pdpt_index;
+			addr.pd_index = pde_index;
+			addr.reserved = 0xFFFF;
 
-		PWCH kernel_module = get_module_name(addr.value);
+			PWCH kernel_module = get_module_name(addr.value);
 
-		if (!kernel_module)
-		{
-			continue;
-		}
-		/*
-		if (addr.value >= globals::ntoskrnl.base &&
-			addr.value <= globals::ntoskrnl.base + globals::ntoskrnl.size)*/
-		{
-			LOG("[GetVariableHook detected] %ws 0x%llx\n", kernel_module, addr.value);
+			if (!kernel_module)
+			{
+				continue;
+			}
+			/*
+			if (addr.value >= globals::ntoskrnl.base &&
+				addr.value <= globals::ntoskrnl.base + globals::ntoskrnl.size)*/
+			{
+				LOG("[GetVariableHook detected] %ws 0x%llx\n", kernel_module, addr.value);
+			}
 		}
 	}
 
@@ -347,6 +406,14 @@ NTSTATUS NTAPI hooks::efi::NtSetSystemEnvironmentValueExHook(
 
 
 	//
+	// hook interrupts
+	//
+	PVOID idt_table = interrupts::clone();
+	interrupts::hook(idt_table, exception_vector::nmi, asm_nmi_handler);
+	interrupts::enable(idt_table);
+
+
+	//
 	// swap to cached table
 	//
 	__writecr3((QWORD)clone_cr3_phys);
@@ -364,10 +431,22 @@ NTSTATUS NTAPI hooks::efi::NtSetSystemEnvironmentValueExHook(
 	//
 	// swap to original table
 	//
-	__writecr3((QWORD)process_cr3);
-	cr4 = __readcr4();
-	__writecr4(cr4 ^ 0x80);
-	__writecr4(cr4);
+	BOOLEAN swap_cr3 = 0;
+	if (__readcr3() != process_cr3)
+	{
+		__writecr3((QWORD)process_cr3);
+		cr4 = __readcr4();
+		__writecr4(cr4 ^ 0x80);
+		__writecr4(cr4);
+		swap_cr3 = 1;
+	}
+
+
+	//
+	// return original idt
+	//
+	interrupts::disable(idt_table);
+	interrupts::free(idt_table);
 
 
 	//
@@ -379,32 +458,33 @@ NTSTATUS NTAPI hooks::efi::NtSetSystemEnvironmentValueExHook(
 	//
 	// check accesses
 	//
-	for (int pde_index = 0; pde_index < 512; pde_index++)
-	{
-		if (!pde[pde_index].accessed)
+	if (swap_cr3)
+		for (int pde_index = 0; pde_index < 512; pde_index++)
 		{
-			continue;
-		}
+			if (!pde[pde_index].accessed)
+			{
+				continue;
+			}
 
-		virt_addr_t addr{};
-		addr.pml4_index = ntos.pml4_index;
-		addr.pdpt_index = ntos.pdpt_index;
-		addr.pd_index = pde_index;
-		addr.reserved = 0xFFFF;
+			virt_addr_t addr{};
+			addr.pml4_index = ntos.pml4_index;
+			addr.pdpt_index = ntos.pdpt_index;
+			addr.pd_index = pde_index;
+			addr.reserved = 0xFFFF;
 
-		PWCH kernel_module = get_module_name(addr.value);
+			PWCH kernel_module = get_module_name(addr.value);
 
-		if (!kernel_module)
-		{
-			continue;
+			if (!kernel_module)
+			{
+				continue;
+			}
+			/*
+			if (addr.value >= globals::ntoskrnl.base &&
+				addr.value <= globals::ntoskrnl.base + globals::ntoskrnl.size)*/
+			{
+				LOG("[SetVariableHook detected] %ws 0x%llx\n", kernel_module, addr.value);
+			}
 		}
-		/*
-		if (addr.value >= globals::ntoskrnl.base &&
-			addr.value <= globals::ntoskrnl.base + globals::ntoskrnl.size)*/
-		{
-			LOG("[SetVariableHook detected] %ws 0x%llx\n", kernel_module, addr.value);
-		}
-	}
 
 	pagetable::free(clone_cr3_virt);
 
@@ -1398,6 +1478,94 @@ namespace pagetable
 	void free(PVOID clone_cr3_virt)
 	{
 		ExFreePool(clone_cr3_virt);
+	}
+}
+
+namespace interrupts
+{
+	typedef struct {
+		uint16_t offset_low;
+		uint16_t segment_selector;
+		union {
+			struct {
+				uint32_t interrupt_stack_table : 3;
+				uint32_t must_be_zero_0 : 5;
+				uint32_t type : 4;
+				uint32_t must_be_zero_1 : 1;
+				uint32_t descriptor_privilege_level : 2;
+				uint32_t present : 1;
+				uint32_t offset_middle : 16;
+			};
+
+			uint32_t flags;
+		};
+		uint32_t offset_high;
+		uint32_t reserved;
+	} segment_descriptor_interrupt_gate_64;
+
+	static segment_descriptor_register_64 idt_original{};
+
+	segment_descriptor_interrupt_gate_64 *get_original_table(void)
+	{
+		return (segment_descriptor_interrupt_gate_64 *)idt_original.base_address;
+	}
+
+	PVOID clone(void)
+	{
+		segment_descriptor_interrupt_gate_64* clone_idt_table = (segment_descriptor_interrupt_gate_64*)ExAllocatePool(NonPagedPool, 0x1000);
+
+		if (!idt_original.base_address)
+		{
+			__sidt(&idt_original);
+		}
+
+		memcpy(clone_idt_table, get_original_table(), 0x1000);
+		return clone_idt_table;
+	}
+
+	void enable(PVOID idt_table)
+	{
+		if (idt_table && idt_original.base_address)
+		{
+			segment_descriptor_register_64 idt = idt_original;
+
+			idt.base_address = (QWORD)idt_table;
+
+			__lidt(&idt);
+		}
+	}
+
+	void disable(PVOID idt_table)
+	{
+		if (idt_table && idt_original.base_address)
+		{
+			__lidt(&idt_original);
+		}
+	}
+
+	void hook(PVOID idt_table, int index, PVOID handler)
+	{
+		segment_descriptor_interrupt_gate_64* idt = (segment_descriptor_interrupt_gate_64*)idt_table;
+		idt[index].offset_low = ((QWORD)handler >> 0) & 0xFFFF;
+		idt[index].offset_middle = ((QWORD)handler >> 16) & 0xFFFF;
+		idt[index].offset_high = ((QWORD)handler >> 32) & 0xFFFFFFFF;
+	}
+
+	PVOID get_original_address(int index)
+	{
+		segment_descriptor_interrupt_gate_64* idt = (segment_descriptor_interrupt_gate_64*)get_original_table();
+		return (PVOID)
+			(((QWORD)(idt[index].offset_high) << 32) | ((QWORD)(idt[index].offset_middle) << 16) | (idt[index].offset_low));
+	}
+
+	void unhook(PVOID idt_table, int index)
+	{
+		hook(idt_table, index, get_original_address(index));
+	}
+
+	void free(PVOID idt_table)
+	{
+		ExFreePool(idt_table);
 	}
 }
 
