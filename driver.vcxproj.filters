@@ -38,7 +38,7 @@
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <MASM Include="utils.asm">
+    <MASM Include="interrupts.asm">
       <Filter>Source Files</Filter>
     </MASM>
   </ItemGroup>

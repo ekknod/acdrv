@@ -203,7 +203,7 @@
     <ClInclude Include="img.h" />
   </ItemGroup>
   <ItemGroup>
-    <MASM Include="utils.asm" />
+    <MASM Include="interrupts.asm" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

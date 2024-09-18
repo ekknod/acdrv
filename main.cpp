@@ -225,21 +225,79 @@ namespace interrupts
 	void free(PVOID clone_interrupt_table);
 }
 
+#define GET_BIT(data, bit) ((data >> bit) & 1)
+
 extern "C"
 {
+DWORD idt_nmi_count=0;
 PVOID nmi_handler_original;
+PVOID pagefault_handler_original;
 }
+
+extern "C" void asm_nmi_handler(void);
+extern "C" void asm_pagefault_handler(void);
+
 extern "C" void __fastcall nmi_handler()
 {
 	nmi_handler_original = interrupts::get_original_address(exception_vector::nmi);
-
-	//
-	// write original page table back
-	//
-	__writecr3( *(QWORD*)((QWORD)PsGetCurrentProcess() + 0x28) );
+	idt_nmi_count++;
 }
 
-extern "C" void asm_nmi_handler(void); // calls nmi_handler, and jumps back to nmi_handler_original
+extern "C" QWORD __fastcall pagefault_handler(QWORD error_code)
+{
+	pagefault_handler_original = interrupts::get_original_address(exception_vector::page_fault);
+
+
+	UNREFERENCED_PARAMETER(error_code);
+
+
+	//
+	// 1: continue execution normally
+	// 0: calls windows page fault handler
+	//
+	QWORD pagefault_handled = 0;
+
+
+	//
+	// nx error
+	//
+	/*
+	if (!GET_BIT(error_code, 4))
+	{
+		return pagefault_handled;
+	}
+	*/
+
+
+	//
+	// address space information
+	//
+	/*
+	QWORD current_thread  = __readgsqword(0x188);
+	QWORD current_process = *(QWORD*)(current_thread + 0xB8);
+	QWORD process_cr3     = *(QWORD*)(current_process + 0x28);
+	if (process_cr3 == __readcr3())
+	{
+		return pagefault_handled;
+	}
+	*/
+
+
+	/*
+	QWORD  fault_address = __readcr2();
+	QWORD  MmPteBase     = *(QWORD*)((QWORD)MmGetVirtualForPhysical + 0x20 + 0x02);
+	QWORD  pte_address   = MmPteBase + ((fault_address >> 9) & 0x7FFFFFFFF8);
+	QWORD  pde_address   = MmPteBase + ((pte_address >> 9) & 0x7FFFFFFFF8);
+	QWORD  pdpt_address  = MmPteBase + ((pde_address >> 9) & 0x7FFFFFFFF8);
+	QWORD  pml4_address  = MmPteBase + ((pdpt_address >> 9) & 0x7FFFFFFFF8);
+	((pde_64*)pde_address)->execute_disable = 0;
+	((pde_64*)pde_address)->accessed = 1;
+	pagefault_handled = 1;
+	*/
+
+
+	return pagefault_handled;
+}
 
 NTSTATUS NTAPI hooks::efi::NtQuerySystemEnvironmentValueExHook(
 	PUNICODE_STRING VariableName,
@@ -254,6 +312,8 @@ NTSTATUS NTAPI hooks::efi::NtQuerySystemEnvironmentValueExHook(
 		return STATUS_INVALID_PARAMETER_1;
 	}
 
+	DWORD nmi_count = idt_nmi_count;
+
 	virt_addr_t ntos;
 	pml4e_64* pml4;
 	pdpte_64* pdpt;
@@ -262,14 +322,6 @@ NTSTATUS NTAPI hooks::efi::NtQuerySystemEnvironmentValueExHook(
 	ntos.value           = globals::ntoskrnl.base;
 	QWORD process_cr3    = __readcr3();
 	PVOID clone_cr3_virt = pagetable::clone(process_cr3, (PVOID*)&pml4, (PVOID*)&pdpt, (PVOID*)&pde);
-
-	if (!clone_cr3_virt)
-	{
-		return oGetVariable(VariableName->Buffer, VendorGuid, (DWORD*)Attributes, (QWORD*)ValueLength, Value) == 0 ?
-			STATUS_SUCCESS :
-			STATUS_INVALID_PARAMETER;
-	}
-
 	QWORD clone_cr3_phys = MmGetPhysicalAddress(clone_cr3_virt).QuadPart;
 
 
@@ -284,6 +336,7 @@ NTSTATUS NTAPI hooks::efi::NtQuerySystemEnvironmentValueExHook(
 	//
 	PVOID idt_table = interrupts::clone();
 	interrupts::hook(idt_table, exception_vector::nmi, asm_nmi_handler);
+	interrupts::hook(idt_table, exception_vector::page_fault, asm_pagefault_handler);
 	interrupts::enable(idt_table);
 
 
@@ -305,14 +358,12 @@ NTSTATUS NTAPI hooks::efi::NtQuerySystemEnvironmentValueExHook(
 	//
 	// swap to original table
 	//
-	BOOLEAN swap_cr3 = 0;
 	if (__readcr3() != process_cr3)
 	{
 		__writecr3((QWORD)process_cr3);
 		cr4 = __readcr4();
 		__writecr4(cr4 ^ 0x80);
 		__writecr4(cr4);
-		swap_cr3 = 1;
 	}
 
 
@@ -332,7 +383,7 @@ NTSTATUS NTAPI hooks::efi::NtQuerySystemEnvironmentValueExHook(
 	//
 	// check accesses
 	//
-	if (swap_cr3)
+	if (nmi_count == idt_nmi_count)
 	{
 		for (int pde_index = 0; pde_index < 512; pde_index++)
 		{
@@ -344,20 +395,13 @@ NTSTATUS NTAPI hooks::efi::NtQuerySystemEnvironmentValueExHook(
 			virt_addr_t addr{};
 			addr.pml4_index = ntos.pml4_index;
 			addr.pdpt_index = ntos.pdpt_index;
-			addr.pd_index = pde_index;
-			addr.reserved = 0xFFFF;
+			addr.pd_index   = pde_index;
+			addr.reserved   = 0xFFFF;
 
-			PWCH kernel_module = get_module_name(addr.value);
-
-			if (!kernel_module)
-			{
-				continue;
-			}
-			/*
 			if (addr.value >= globals::ntoskrnl.base &&
-				addr.value <= globals::ntoskrnl.base + globals::ntoskrnl.size)*/
+				addr.value <= globals::ntoskrnl.base + globals::ntoskrnl.size)
 			{
-				LOG("[GetVariableHook detected] %ws 0x%llx\n", kernel_module, addr.value);
+				LOG("[GetVariableHook detected] ntoskrnl.exe 0x%llx\n", addr.value);
 			}
 		}
 	}
@@ -380,6 +424,8 @@ NTSTATUS NTAPI hooks::efi::NtSetSystemEnvironmentValueExHook(
 		return STATUS_INVALID_PARAMETER_1;
 	}
 
+	DWORD nmi_count = idt_nmi_count;
+
 	virt_addr_t ntos;
 	pml4e_64* pml4;
 	pdpte_64* pdpt;
@@ -388,14 +434,6 @@ NTSTATUS NTAPI hooks::efi::NtSetSystemEnvironmentValueExHook(
 	ntos.value = globals::ntoskrnl.base;
 	QWORD process_cr3 = __readcr3();
 	PVOID clone_cr3_virt = pagetable::clone(process_cr3, (PVOID*)&pml4, (PVOID*)&pdpt, (PVOID*)&pde);
-
-	if (!clone_cr3_virt)
-	{
-		return oSetVariable(VariableName->Buffer, VendorGuid, Attributes, ValueLength, Value) == 0 ?
-			STATUS_SUCCESS :
-			STATUS_INVALID_PARAMETER;
-	}
-
 	QWORD clone_cr3_phys = MmGetPhysicalAddress(clone_cr3_virt).QuadPart;
 
 
@@ -410,6 +448,7 @@ NTSTATUS NTAPI hooks::efi::NtSetSystemEnvironmentValueExHook(
 	//
 	PVOID idt_table = interrupts::clone();
 	interrupts::hook(idt_table, exception_vector::nmi, asm_nmi_handler);
+	interrupts::hook(idt_table, exception_vector::page_fault, asm_pagefault_handler);
 	interrupts::enable(idt_table);
 
 
@@ -423,7 +462,7 @@ NTSTATUS NTAPI hooks::efi::NtSetSystemEnvironmentValueExHook(
 
 
 	//
-	// call efi SetVariable
+	// call efi GetVariable
 	//
 	QWORD status = oSetVariable(VariableName->Buffer, VendorGuid, Attributes, ValueLength, Value);
 
@@ -431,14 +470,12 @@ NTSTATUS NTAPI hooks::efi::NtSetSystemEnvironmentValueExHook(
 	//
 	// swap to original table
 	//
-	BOOLEAN swap_cr3 = 0;
 	if (__readcr3() != process_cr3)
 	{
 		__writecr3((QWORD)process_cr3);
 		cr4 = __readcr4();
 		__writecr4(cr4 ^ 0x80);
 		__writecr4(cr4);
-		swap_cr3 = 1;
 	}
 
 
@@ -458,7 +495,8 @@ NTSTATUS NTAPI hooks::efi::NtSetSystemEnvironmentValueExHook(
 	//
 	// check accesses
 	//
-	if (swap_cr3)
+	if (nmi_count == idt_nmi_count)
+	{
 		for (int pde_index = 0; pde_index < 512; pde_index++)
 		{
 			if (!pde[pde_index].accessed)
@@ -472,19 +510,13 @@ NTSTATUS NTAPI hooks::efi::NtSetSystemEnvironmentValueExHook(
 			addr.pd_index = pde_index;
 			addr.reserved = 0xFFFF;
 
-			PWCH kernel_module = get_module_name(addr.value);
-
-			if (!kernel_module)
-			{
-				continue;
-			}
-			/*
 			if (addr.value >= globals::ntoskrnl.base &&
-				addr.value <= globals::ntoskrnl.base + globals::ntoskrnl.size)*/
+				addr.value <= globals::ntoskrnl.base + globals::ntoskrnl.size)
 			{
-				LOG("[SetVariableHook detected] %ws 0x%llx\n", kernel_module, addr.value);
+				LOG("[SetVariableHook detected] ntoskrnl.exe 0x%llx\n", addr.value);
 			}
 		}
+	}
 
 	pagetable::free(clone_cr3_virt);
 
@@ -1457,6 +1489,15 @@ namespace pagetable
 
 		cache_pdpt_virt[ntos.pdpt_index].page_frame_number =
 			get_physical_address(cache_pde_virt) >> PAGE_SHIFT;
+
+		//
+		// self referencing pml4
+		//
+		virt_addr_t MmPteBase{};
+		MmPteBase.value = *(QWORD*)((QWORD)MmGetVirtualForPhysical + 0x20 + 0x02);
+		cache_pml4_virt[MmPteBase.pml4_index].page_frame_number =
+			get_physical_address(cache_pml4_virt) >> PAGE_SHIFT;
+
 
 		//
 		// clear accessed bits
