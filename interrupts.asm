@@ -12,7 +12,7 @@ extern pagefault_handler_original:proc
 extern pagefault_handler:proc
 
 save_general_regs macro
-    push rax
+	push rax
 	push rbx
 	push rcx
 	push rdx
@@ -50,41 +50,74 @@ endm
 asm_nmi_handler proc
 	save_general_regs
 
+
+	;
+	; enable interrupts
+	;
+	mov rax, QWORD PTR [rsp + 88h] ; load rflags
+	or rax, 200h                   ; set interrupt enable flag
+	mov QWORD PTR [rsp + 88h], rax ; save rflags
+
+	;
+	; call nmi handler
+	;
 	sub rsp, 40h
-    call nmi_handler
+	call nmi_handler
 	add rsp, 40h
 
-	restore_general_regs
 
+
+	restore_general_regs
 	jmp qword ptr [nmi_handler_original]
+
+
 asm_nmi_handler endp
 
 asm_pagefault_handler proc
 	save_general_regs
 
-	mov rcx, [rsp + 88h] ; error code
 
+	;
+	; enable interrupts
+	;
+	mov rax, QWORD PTR [rsp + 90h]  ; load rflags
+	or rax, 200h                    ; set interrupt enable flag
+	mov QWORD PTR [rsp + 90h], rax  ; save rflags
+
+	;
+	; error code as first parameter
+	;
+	mov rcx, [rsp + 88h]           ; error code
+
+	;
+	; call pagefault handler
+	;
 	sub rsp, 40h
-    call pagefault_handler
+	call pagefault_handler
 
-
+	;
+	; return 0 -> jmp to original handler
+	;
 	test rax, rax
 	je   E0
-
 	add rsp, 40h
 
+
+	;
+	; continue execution
+	;
 	restore_general_regs
 	add rsp, 8 ; skip error code
 	iretq
 
 
 E0:
+	;
+	; windows page fault handler
+	;
 	add rsp, 40h
 	restore_general_regs
 	jmp qword ptr [pagefault_handler_original]
-
-
-
 
 asm_pagefault_handler endp
 

@@ -215,11 +215,11 @@ namespace interrupts
 
 	void hook(PVOID idt_table, int index, PVOID handler);
 
-
-	void enable(PVOID idt_table);
-	void disable(PVOID idt_table);
+	void enable_hooks(PVOID idt_table);
+	void disable_hooks(void);
 
 	PVOID get_original_address(int index);
+	PVOID get_current_address(int index);
 	void unhook(PVOID idt_table, int index);
 
 	void free(PVOID clone_interrupt_table);
@@ -229,9 +229,8 @@ namespace interrupts
 
 extern "C"
 {
-DWORD idt_nmi_count=0;
-PVOID nmi_handler_original;
-PVOID pagefault_handler_original;
+PVOID nmi_handler_original, pagefault_handler_original;
+DWORD idt_nmi_count = 0, idt_pf_count=0;
 }
 
 extern "C" void asm_nmi_handler(void);
@@ -240,61 +239,72 @@ extern "C" void asm_pagefault_handler(void);
 extern "C" void __fastcall nmi_handler()
 {
 	nmi_handler_original = interrupts::get_original_address(exception_vector::nmi);
+
+	QWORD current_thread  = __readgsqword(0x188);
+	QWORD current_process = *(QWORD*)(current_thread + 0xB8);
+	QWORD process_cr3     = *(QWORD*)(current_process + 0x28);
+
+	if (__readcr3() != process_cr3)
+	{
+		__writecr3((QWORD)process_cr3);
+		QWORD cr4 = __readcr4();
+		__writecr4(cr4 ^ 0x80);
+		__writecr4(cr4);
+	}
+
+	interrupts::disable_hooks();
+
 	idt_nmi_count++;
 }
 
 extern "C" QWORD __fastcall pagefault_handler(QWORD error_code)
 {
 	pagefault_handler_original = interrupts::get_original_address(exception_vector::page_fault);
-
-
-	UNREFERENCED_PARAMETER(error_code);
-
-
 	//
 	// 1: continue execution normally
-	// 0: calls windows page fault handler
+	// 0: let windows page fault handle it
 	//
 	QWORD pagefault_handled = 0;
 
 
-	//
-	// nx error
-	//
-	/*
-	if (!GET_BIT(error_code, 4))
-	{
-		return pagefault_handled;
-	}
-	*/
-
-
-	//
-	// address space information
-	//
-	/*
 	QWORD current_thread  = __readgsqword(0x188);
 	QWORD current_process = *(QWORD*)(current_thread + 0xB8);
 	QWORD process_cr3     = *(QWORD*)(current_process + 0x28);
-	if (process_cr3 == __readcr3())
+
+
+	if (!GET_BIT(error_code, 4)) // nx???
 	{
-		return pagefault_handled;
+		goto E0;
 	}
-	*/
 
 
-	/*
 	QWORD  fault_address = __readcr2();
 	QWORD  MmPteBase     = *(QWORD*)((QWORD)MmGetVirtualForPhysical + 0x20 + 0x02);
 	QWORD  pte_address   = MmPteBase + ((fault_address >> 9) & 0x7FFFFFFFF8);
 	QWORD  pde_address   = MmPteBase + ((pte_address >> 9) & 0x7FFFFFFFF8);
-	QWORD  pdpt_address  = MmPteBase + ((pde_address >> 9) & 0x7FFFFFFFF8);
-	QWORD  pml4_address  = MmPteBase + ((pdpt_address >> 9) & 0x7FFFFFFFF8);
+	// QWORD  pdpt_address  = MmPteBase + ((pde_address >> 9) & 0x7FFFFFFFF8);
+	// QWORD  pml4_address  = MmPteBase + ((pdpt_address >> 9) & 0x7FFFFFFFF8);
 	((pde_64*)pde_address)->execute_disable = 0;
-	((pde_64*)pde_address)->accessed = 1;
-	pagefault_handled = 1;
-	*/
+	((pde_64*)pde_address)->accessed        = 1;
 
+
+	//
+	// our PF handler did it
+	//
+	pagefault_handled = 1;
+
+
+	idt_pf_count++;
+E0:
+	if (__readcr3() != process_cr3)
+	{
+		__writecr3((QWORD)process_cr3);
+		QWORD cr4 = __readcr4();
+		__writecr4(cr4 ^ 0x80);
+		__writecr4(cr4);
+	}
+
+	interrupts::disable_hooks();
 
 	return pagefault_handled;
 }
@@ -312,32 +322,45 @@ NTSTATUS NTAPI hooks::efi::NtQuerySystemEnvironmentValueExHook(
 		return STATUS_INVALID_PARAMETER_1;
 	}
 
-	DWORD nmi_count = idt_nmi_count;
 
-	virt_addr_t ntos;
 	pml4e_64* pml4;
 	pdpte_64* pdpt;
-	pde_64  * pde;
+	pde_64* pde;
 
-	ntos.value           = globals::ntoskrnl.base;
-	QWORD process_cr3    = __readcr3();
+
+	QWORD process_cr3 = __readcr3();
 	PVOID clone_cr3_virt = pagetable::clone(process_cr3, (PVOID*)&pml4, (PVOID*)&pdpt, (PVOID*)&pde);
-	QWORD clone_cr3_phys = MmGetPhysicalAddress(clone_cr3_virt).QuadPart;
+	QWORD clone_cr3_phys = get_physical_address(clone_cr3_virt);
+	virt_addr_t ntoskrnl = *(virt_addr_t*)&globals::ntoskrnl.base;
+	DWORD nmi_count = idt_nmi_count;
 
 
 	//
-	// disable interrupts
+	// trap ntoskrnl.exe range
 	//
-	_disable();
+	for (int i = 0; i < 512; i++)
+	{
+		virt_addr_t addr{};
+		addr.pml4_index = ntoskrnl.pml4_index;
+		addr.pdpt_index = ntoskrnl.pdpt_index;
+		addr.pd_index = i;
+		addr.reserved = 0xFFFF;
+
+		if (addr.value >= globals::ntoskrnl.base &&
+			addr.value <= globals::ntoskrnl.base + globals::ntoskrnl.size)
+		{
+			pde[i].execute_disable = 1;
+		}
+	}
 
 
 	//
-	// hook interrupts
+	// hijack interrupts
 	//
-	PVOID idt_table = interrupts::clone();
-	interrupts::hook(idt_table, exception_vector::nmi, asm_nmi_handler);
-	interrupts::hook(idt_table, exception_vector::page_fault, asm_pagefault_handler);
-	interrupts::enable(idt_table);
+	PVOID idt = interrupts::clone();
+	interrupts::hook(idt, exception_vector::nmi, asm_nmi_handler);
+	interrupts::hook(idt, exception_vector::page_fault, asm_pagefault_handler);
+	interrupts::enable_hooks(idt);
 
 
 	//
@@ -368,16 +391,10 @@ NTSTATUS NTAPI hooks::efi::NtQuerySystemEnvironmentValueExHook(
 
 
 	//
-	// return original idt
+	// unhook interrupts
 	//
-	interrupts::disable(idt_table);
-	interrupts::free(idt_table);
-
-
-	//
-	// enable interrupts
-	//
-	_enable();
+	interrupts::disable_hooks();
+	interrupts::free(idt);
 
 
 	//
@@ -385,18 +402,18 @@ NTSTATUS NTAPI hooks::efi::NtQuerySystemEnvironmentValueExHook(
 	//
 	if (nmi_count == idt_nmi_count)
 	{
-		for (int pde_index = 0; pde_index < 512; pde_index++)
+		for (int i = 0; i < 512; i++)
 		{
-			if (!pde[pde_index].accessed)
+			if (!pde[i].accessed)
 			{
 				continue;
 			}
 
 			virt_addr_t addr{};
-			addr.pml4_index = ntos.pml4_index;
-			addr.pdpt_index = ntos.pdpt_index;
-			addr.pd_index   = pde_index;
-			addr.reserved   = 0xFFFF;
+			addr.pml4_index = ntoskrnl.pml4_index;
+			addr.pdpt_index = ntoskrnl.pdpt_index;
+			addr.pd_index = i;
+			addr.reserved = 0xFFFF;
 
 			if (addr.value >= globals::ntoskrnl.base &&
 				addr.value <= globals::ntoskrnl.base + globals::ntoskrnl.size)
@@ -406,7 +423,12 @@ NTSTATUS NTAPI hooks::efi::NtQuerySystemEnvironmentValueExHook(
 		}
 	}
 
+
+	//
+	// free memory
+	//
 	pagetable::free(clone_cr3_virt);
+
 
 	return status == 0 ? STATUS_SUCCESS : STATUS_INVALID_PARAMETER;
 }
@@ -424,32 +446,45 @@ NTSTATUS NTAPI hooks::efi::NtSetSystemEnvironmentValueExHook(
 		return STATUS_INVALID_PARAMETER_1;
 	}
 
-	DWORD nmi_count = idt_nmi_count;
 
-	virt_addr_t ntos;
 	pml4e_64* pml4;
 	pdpte_64* pdpt;
 	pde_64* pde;
 
-	ntos.value = globals::ntoskrnl.base;
+
 	QWORD process_cr3 = __readcr3();
 	PVOID clone_cr3_virt = pagetable::clone(process_cr3, (PVOID*)&pml4, (PVOID*)&pdpt, (PVOID*)&pde);
-	QWORD clone_cr3_phys = MmGetPhysicalAddress(clone_cr3_virt).QuadPart;
+	QWORD clone_cr3_phys = get_physical_address(clone_cr3_virt);
+	virt_addr_t ntoskrnl = *(virt_addr_t*)&globals::ntoskrnl.base;
+	DWORD nmi_count = idt_nmi_count;
 
 
 	//
-	// disable interrupts
+	// trap ntoskrnl.exe range
 	//
-	_disable();
+	for (int i = 0; i < 512; i++)
+	{
+		virt_addr_t addr{};
+		addr.pml4_index = ntoskrnl.pml4_index;
+		addr.pdpt_index = ntoskrnl.pdpt_index;
+		addr.pd_index = i;
+		addr.reserved = 0xFFFF;
+
+		if (addr.value >= globals::ntoskrnl.base &&
+			addr.value <= globals::ntoskrnl.base + globals::ntoskrnl.size)
+		{
+			pde[i].execute_disable = 1;
+		}
+	}
 
 
 	//
-	// hook interrupts
+	// hijack interrupts
 	//
-	PVOID idt_table = interrupts::clone();
-	interrupts::hook(idt_table, exception_vector::nmi, asm_nmi_handler);
-	interrupts::hook(idt_table, exception_vector::page_fault, asm_pagefault_handler);
-	interrupts::enable(idt_table);
+	PVOID idt = interrupts::clone();
+	interrupts::hook(idt, exception_vector::nmi, asm_nmi_handler);
+	interrupts::hook(idt, exception_vector::page_fault, asm_pagefault_handler);
+	interrupts::enable_hooks(idt);
 
 
 	//
@@ -462,7 +497,7 @@ NTSTATUS NTAPI hooks::efi::NtSetSystemEnvironmentValueExHook(
 
 
 	//
-	// call efi GetVariable
+	// call efi SetVariable
 	//
 	QWORD status = oSetVariable(VariableName->Buffer, VendorGuid, Attributes, ValueLength, Value);
 
@@ -480,16 +515,10 @@ NTSTATUS NTAPI hooks::efi::NtSetSystemEnvironmentValueExHook(
 
 
 	//
-	// return original idt
+	// unhook interrupts
 	//
-	interrupts::disable(idt_table);
-	interrupts::free(idt_table);
-
-
-	//
-	// enable interrupts
-	//
-	_enable();
+	interrupts::disable_hooks();
+	interrupts::free(idt);
 
 
 	//
@@ -497,17 +526,17 @@ NTSTATUS NTAPI hooks::efi::NtSetSystemEnvironmentValueExHook(
 	//
 	if (nmi_count == idt_nmi_count)
 	{
-		for (int pde_index = 0; pde_index < 512; pde_index++)
+		for (int i = 0; i < 512; i++)
 		{
-			if (!pde[pde_index].accessed)
+			if (!pde[i].accessed)
 			{
 				continue;
 			}
 
 			virt_addr_t addr{};
-			addr.pml4_index = ntos.pml4_index;
-			addr.pdpt_index = ntos.pdpt_index;
-			addr.pd_index = pde_index;
+			addr.pml4_index = ntoskrnl.pml4_index;
+			addr.pdpt_index = ntoskrnl.pdpt_index;
+			addr.pd_index = i;
 			addr.reserved = 0xFFFF;
 
 			if (addr.value >= globals::ntoskrnl.base &&
@@ -518,7 +547,12 @@ NTSTATUS NTAPI hooks::efi::NtSetSystemEnvironmentValueExHook(
 		}
 	}
 
+
+	//
+	// free memory
+	//
 	pagetable::free(clone_cr3_virt);
+
 
 	return status == 0 ? STATUS_SUCCESS : STATUS_INVALID_PARAMETER;
 }
@@ -853,6 +887,16 @@ UCHAR __fastcall hooks::swap_ctx::HalClearLastBranchRecordStackHook(void)
 {
 	QWORD current_thread = __readgsqword(0x188);
 	QWORD cr3 = __readcr3();
+
+	if (interrupts::get_current_address(exception_vector::page_fault) != interrupts::get_original_address(exception_vector::page_fault))
+	{
+		LOG("page fault was hooked\n");
+	}
+
+	if (interrupts::get_current_address(exception_vector::nmi) != interrupts::get_original_address(exception_vector::nmi))
+	{
+		LOG("nmi was hooked\n");
+	}
 
 	if (unlink_thread_detection(current_thread))
 	{
@@ -1564,10 +1608,12 @@ namespace interrupts
 		return clone_idt_table;
 	}
 
-	void enable(PVOID idt_table)
+	void enable_hooks(PVOID idt_table)
 	{
 		if (idt_table && idt_original.base_address)
 		{
+			_disable();
+
 			segment_descriptor_register_64 idt = idt_original;
 
 			idt.base_address = (QWORD)idt_table;
@@ -1576,10 +1622,12 @@ namespace interrupts
 		}
 	}
 
-	void disable(PVOID idt_table)
+	void disable_hooks(void)
 	{
-		if (idt_table && idt_original.base_address)
+		if (idt_original.base_address)
 		{
+			_enable();
+
 			__lidt(&idt_original);
 		}
 	}
@@ -1595,6 +1643,21 @@ namespace interrupts
 	PVOID get_original_address(int index)
 	{
 		segment_descriptor_interrupt_gate_64* idt = (segment_descriptor_interrupt_gate_64*)get_original_table();
+
+		if (idt == 0) return 0;
+
+		return (PVOID)
+			(((QWORD)(idt[index].offset_high) << 32) | ((QWORD)(idt[index].offset_middle) << 16) | (idt[index].offset_low));
+	}
+
+	PVOID get_current_address(int index)
+	{
+		if (get_original_table() == 0) return 0;
+
+		segment_descriptor_register_64 idt_current{};
+		__sidt(&idt_current);
+
+		segment_descriptor_interrupt_gate_64* idt = (segment_descriptor_interrupt_gate_64*)idt_current.base_address;
 		return (PVOID)
 			(((QWORD)(idt[index].offset_high) << 32) | ((QWORD)(idt[index].offset_middle) << 16) | (idt[index].offset_low));
 	}
