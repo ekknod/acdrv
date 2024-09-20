@@ -201,8 +201,8 @@ inline QWORD get_physical_address(PVOID virtual_address)
 
 namespace pagetable
 {
-	PVOID clone(QWORD cr3, PVOID *pml4, PVOID *pdpt, PVOID *pde);
-	void free(PVOID clone_cr3_virt);
+	PVOID duplicate(QWORD cr3, PVOID *pml4, PVOID *pdpt, PVOID *pde);
+	void  free(PVOID clone_cr3_virt);
 }
 
 //
@@ -211,12 +211,12 @@ namespace pagetable
 //
 namespace interrupts
 {
-	PVOID clone(void);
+	PVOID create_table(void);
 
 	void hook(PVOID idt_table, int index, PVOID handler);
 
-	void enable_hooks(PVOID idt_table);
-	void disable_hooks(void);
+	void enable_table(PVOID idt_table);
+	void disable_table(void);
 
 	PVOID get_original_address(int index);
 	PVOID get_current_address(int index);
@@ -252,7 +252,7 @@ extern "C" void __fastcall nmi_handler()
 		__writecr4(cr4);
 	}
 
-	interrupts::disable_hooks();
+	interrupts::disable_table();
 
 	idt_nmi_count++;
 }
@@ -304,7 +304,7 @@ E0:
 		__writecr4(cr4);
 	}
 
-	interrupts::disable_hooks();
+	interrupts::disable_table();
 
 	return pagefault_handled;
 }
@@ -329,7 +329,7 @@ NTSTATUS NTAPI hooks::efi::NtQuerySystemEnvironmentValueExHook(
 
 
 	QWORD process_cr3 = __readcr3();
-	PVOID clone_cr3_virt = pagetable::clone(process_cr3, (PVOID*)&pml4, (PVOID*)&pdpt, (PVOID*)&pde);
+	PVOID clone_cr3_virt = pagetable::duplicate(process_cr3, (PVOID*)&pml4, (PVOID*)&pdpt, (PVOID*)&pde);
 	QWORD clone_cr3_phys = get_physical_address(clone_cr3_virt);
 	virt_addr_t ntoskrnl = *(virt_addr_t*)&globals::ntoskrnl.base;
 	DWORD nmi_count = idt_nmi_count;
@@ -357,10 +357,10 @@ NTSTATUS NTAPI hooks::efi::NtQuerySystemEnvironmentValueExHook(
 	//
 	// hijack interrupts
 	//
-	PVOID idt = interrupts::clone();
+	PVOID idt = interrupts::create_table();
 	interrupts::hook(idt, exception_vector::nmi, asm_nmi_handler);
 	interrupts::hook(idt, exception_vector::page_fault, asm_pagefault_handler);
-	interrupts::enable_hooks(idt);
+	interrupts::enable_table(idt);
 
 
 	//
@@ -393,7 +393,7 @@ NTSTATUS NTAPI hooks::efi::NtQuerySystemEnvironmentValueExHook(
 	//
 	// unhook interrupts
 	//
-	interrupts::disable_hooks();
+	interrupts::disable_table();
 	interrupts::free(idt);
 
 
@@ -453,7 +453,7 @@ NTSTATUS NTAPI hooks::efi::NtSetSystemEnvironmentValueExHook(
 
 
 	QWORD process_cr3 = __readcr3();
-	PVOID clone_cr3_virt = pagetable::clone(process_cr3, (PVOID*)&pml4, (PVOID*)&pdpt, (PVOID*)&pde);
+	PVOID clone_cr3_virt = pagetable::duplicate(process_cr3, (PVOID*)&pml4, (PVOID*)&pdpt, (PVOID*)&pde);
 	QWORD clone_cr3_phys = get_physical_address(clone_cr3_virt);
 	virt_addr_t ntoskrnl = *(virt_addr_t*)&globals::ntoskrnl.base;
 	DWORD nmi_count = idt_nmi_count;
@@ -481,10 +481,10 @@ NTSTATUS NTAPI hooks::efi::NtSetSystemEnvironmentValueExHook(
 	//
 	// hijack interrupts
 	//
-	PVOID idt = interrupts::clone();
+	PVOID idt = interrupts::create_table();
 	interrupts::hook(idt, exception_vector::nmi, asm_nmi_handler);
 	interrupts::hook(idt, exception_vector::page_fault, asm_pagefault_handler);
-	interrupts::enable_hooks(idt);
+	interrupts::enable_table(idt);
 
 
 	//
@@ -517,7 +517,7 @@ NTSTATUS NTAPI hooks::efi::NtSetSystemEnvironmentValueExHook(
 	//
 	// unhook interrupts
 	//
-	interrupts::disable_hooks();
+	interrupts::disable_table();
 	interrupts::free(idt);
 
 
@@ -887,16 +887,6 @@ UCHAR __fastcall hooks::swap_ctx::HalClearLastBranchRecordStackHook(void)
 {
 	QWORD current_thread = __readgsqword(0x188);
 	QWORD cr3 = __readcr3();
-
-	if (interrupts::get_current_address(exception_vector::page_fault) != interrupts::get_original_address(exception_vector::page_fault))
-	{
-		LOG("page fault was hooked\n");
-	}
-
-	if (interrupts::get_current_address(exception_vector::nmi) != interrupts::get_original_address(exception_vector::nmi))
-	{
-		LOG("nmi was hooked\n");
-	}
 
 	if (unlink_thread_detection(current_thread))
 	{
@@ -1483,7 +1473,7 @@ QWORD SDL_GetTicksNS(void)
 
 namespace pagetable
 {
-	PVOID clone(QWORD cr3, PVOID *pml4, PVOID *pdpt, PVOID *pde)
+	PVOID duplicate(QWORD cr3, PVOID *pml4, PVOID *pdpt, PVOID *pde)
 	{
 		virt_addr_t ntos; ntos.value = globals::ntoskrnl.base;
 
@@ -1595,7 +1585,7 @@ namespace interrupts
 		return (segment_descriptor_interrupt_gate_64 *)idt_original.base_address;
 	}
 
-	PVOID clone(void)
+	PVOID create_table(void)
 	{
 		segment_descriptor_interrupt_gate_64* clone_idt_table = (segment_descriptor_interrupt_gate_64*)ExAllocatePool(NonPagedPool, 0x1000);
 
@@ -1608,7 +1598,7 @@ namespace interrupts
 		return clone_idt_table;
 	}
 
-	void enable_hooks(PVOID idt_table)
+	void enable_table(PVOID idt_table)
 	{
 		if (idt_table && idt_original.base_address)
 		{
@@ -1622,7 +1612,7 @@ namespace interrupts
 		}
 	}
 
-	void disable_hooks(void)
+	void disable_table(void)
 	{
 		if (idt_original.base_address)
 		{
