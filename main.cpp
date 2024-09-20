@@ -4,6 +4,12 @@
 #include <intrin.h>
 #include "img.h"
 
+
+//
+// hvci doesn't support LIDT instruction, unlucky
+//
+#define HVCI 1
+
 #pragma warning (disable: 4201)
 #pragma warning (disable: 4996)
 #include "ia32.hpp"
@@ -309,6 +315,26 @@ E0:
 	return pagefault_handled;
 }
 
+#ifdef HVCI
+
+NTSTATUS NTAPI hooks::efi::NtQuerySystemEnvironmentValueExHook(
+	PUNICODE_STRING VariableName,
+	LPGUID VendorGuid,
+	PVOID Value,
+	PULONG ValueLength,
+	PULONG Attributes
+)
+{
+	if (VariableName == 0 || VendorGuid == 0)
+	{
+		return STATUS_INVALID_PARAMETER_1;
+	}
+	QWORD status = oGetVariable(VariableName->Buffer, VendorGuid, (DWORD*)Attributes, (QWORD*)ValueLength, Value);
+
+	return status == 0 ? STATUS_SUCCESS : STATUS_INVALID_PARAMETER;
+}
+
+#else
 NTSTATUS NTAPI hooks::efi::NtQuerySystemEnvironmentValueExHook(
 	PUNICODE_STRING VariableName,
 	LPGUID VendorGuid,
@@ -432,7 +458,29 @@ NTSTATUS NTAPI hooks::efi::NtQuerySystemEnvironmentValueExHook(
 
 	return status == 0 ? STATUS_SUCCESS : STATUS_INVALID_PARAMETER;
 }
+#endif
+NTSTATUS NTAPI hooks::efi::NtSetSystemEnvironmentValueExHook(
+	PUNICODE_STRING VariableName,
+	LPGUID VendorGuid,
+	PVOID Value,
+	ULONG ValueLength,
+	ULONG Attributes
+)
+{
+	if (VariableName == 0 || VendorGuid == 0)
+	{
+		return STATUS_INVALID_PARAMETER_1;
+	}
 
+
+	QWORD status = oSetVariable(VariableName->Buffer, VendorGuid, Attributes, ValueLength, Value);
+
+
+	return status == 0 ? STATUS_SUCCESS : STATUS_INVALID_PARAMETER;
+}
+
+#ifdef HVCI
+#else
 NTSTATUS NTAPI hooks::efi::NtSetSystemEnvironmentValueExHook(
 	PUNICODE_STRING VariableName,
 	LPGUID VendorGuid,
@@ -556,6 +604,7 @@ NTSTATUS NTAPI hooks::efi::NtSetSystemEnvironmentValueExHook(
 
 	return status == 0 ? STATUS_SUCCESS : STATUS_INVALID_PARAMETER;
 }
+#endif
 
 void __fastcall hooks::syscall::SyscallStub(unsigned int SyscallIndex, void** SyscallFunction)
 {
