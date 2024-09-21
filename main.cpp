@@ -459,6 +459,8 @@ NTSTATUS NTAPI hooks::efi::NtQuerySystemEnvironmentValueExHook(
 	return status == 0 ? STATUS_SUCCESS : STATUS_INVALID_PARAMETER;
 }
 #endif
+
+#ifdef HVCI
 NTSTATUS NTAPI hooks::efi::NtSetSystemEnvironmentValueExHook(
 	PUNICODE_STRING VariableName,
 	LPGUID VendorGuid,
@@ -479,7 +481,6 @@ NTSTATUS NTAPI hooks::efi::NtSetSystemEnvironmentValueExHook(
 	return status == 0 ? STATUS_SUCCESS : STATUS_INVALID_PARAMETER;
 }
 
-#ifdef HVCI
 #else
 NTSTATUS NTAPI hooks::efi::NtSetSystemEnvironmentValueExHook(
 	PUNICODE_STRING VariableName,
