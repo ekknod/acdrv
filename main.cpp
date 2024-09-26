@@ -154,6 +154,8 @@ enum class TRACE_OPERATION
 NTSTATUS ApplyTraceSettings(_In_ TRACE_OPERATION Operation);
 QWORD FindPattern(QWORD base, unsigned char* pattern, unsigned char* mask);
 
+PDRIVER_OBJECT get_driver_object(PCWSTR driver_name);
+
 
 extern "C" VOID DriverUnload(
 	_In_ struct _DRIVER_OBJECT* DriverObject
@@ -174,6 +176,69 @@ extern "C" VOID DriverUnload(
 	LOG("Shutdown\n");
 }
 
+typedef struct _USB_DEVICE_DESCRIPTOR {
+  UCHAR  bLength;
+  UCHAR  bDescriptorType;
+  USHORT bcdUSB;
+  UCHAR  bDeviceClass;
+  UCHAR  bDeviceSubClass;
+  UCHAR  bDeviceProtocol;
+  UCHAR  bMaxPacketSize0;
+  USHORT idVendor;
+  USHORT idProduct;
+  USHORT bcdDevice;
+  UCHAR  iManufacturer;
+  UCHAR  iProduct;
+  UCHAR  iSerialNumber;
+  UCHAR  bNumConfigurations;
+} USB_DEVICE_DESCRIPTOR, *PUSB_DEVICE_DESCRIPTOR;
+
+typedef struct _USBD_INTERFACE_INFORMATION {
+  USHORT                Length;
+  UCHAR                 InterfaceNumber;
+  UCHAR                 AlternateSetting;
+  UCHAR                 Class;
+  UCHAR                 SubClass;
+  UCHAR                 Protocol;
+  UCHAR                 Reserved;
+  PVOID                 InterfaceHandle;
+  ULONG                 NumberOfPipes;
+  PVOID                 Pipes[1];
+} USBD_INTERFACE_INFORMATION, *PUSBD_INTERFACE_INFORMATION;
+
+void enumerate_kmboxnet(USHORT vendor_id, USHORT product_id)
+{
+	PDRIVER_OBJECT hidusb = get_driver_object(L"\\Driver\\hidusb");
+	PDEVICE_OBJECT hidusb_device = hidusb->DeviceObject;
+
+	BOOLEAN found = 0;
+	BOOLEAN found_312 = 0;
+
+	while (hidusb_device)
+	{
+		QWORD                       ext  = *(QWORD *)((QWORD)hidusb_device->DeviceExtension + 16LL);
+		PUSB_DEVICE_DESCRIPTOR      desc = (PUSB_DEVICE_DESCRIPTOR)*(QWORD*)(ext + 0x08);
+		PUSBD_INTERFACE_INFORMATION intf = (PUSBD_INTERFACE_INFORMATION)*(QWORD*)(ext + 0x10);
+		if (desc->idVendor == vendor_id && desc->idProduct == product_id)
+		{
+			found = 1;
+			if (intf->Class == 0x03 && intf->SubClass == 0x01 && intf->Protocol == 0x02)
+			{
+				found_312 = 1;
+			}
+		}
+		hidusb_device = hidusb_device->NextDevice;
+	}
+	if (found)
+	{
+		if (!found_312)
+		{
+			LOG("kmbox detected: %lx:%lx\n", vendor_id, product_id);
+		}
+	}
+	return;
+}
+
 extern "C" NTSTATUS DriverEntry(
 	_In_ PDRIVER_OBJECT  DriverObject,
 	_In_ PUNICODE_STRING RegistryPath
@@ -181,6 +246,23 @@ extern "C" NTSTATUS DriverEntry(
 {
 	UNREFERENCED_PARAMETER(RegistryPath);
 	UNREFERENCED_PARAMETER(DriverObject);
+
+
+	typedef struct {
+		WORD vendor;
+		WORD product;
+	} KMBOX_LIST;
+
+	KMBOX_LIST kmbox_devices[] = {
+		{0x04a5, 0x8002}, // zowie
+		{0x046d, 0xc547}, // logitech g-pro
+		{0x1532, 0x00b7}, // razer deathadder v3 pro
+	};
+
+	for (int i = 0; i < sizeof(kmbox_devices) / sizeof(*kmbox_devices); i++)
+	{
+		enumerate_kmboxnet(kmbox_devices[i].vendor, kmbox_devices[i].product);
+	}
 
 	globals::ntoskrnl = get_module_info(0);
 	globals::vmusbmouse = get_module_info(L"vmusbmouse.sys");
@@ -1062,26 +1144,30 @@ ObReferenceObjectByName(
 );
 
 extern "C" NTSYSCALLAPI POBJECT_TYPE * IoDriverObjectType;
-void get_mouse_class_address(PDRIVER_OBJECT* mouclass, PDRIVER_OBJECT* mouhid)
+
+PDRIVER_OBJECT get_driver_object(PCWSTR driver_name)
 {
 	UNICODE_STRING class_string;
-	RtlInitUnicodeString(&class_string, L"\\Driver\\MouClass");
+	RtlInitUnicodeString(&class_string, driver_name);
 
 	PDRIVER_OBJECT driver_object = 0;
 	ObReferenceObjectByName(&class_string, OBJ_CASE_INSENSITIVE, 0, 0, *IoDriverObjectType, KernelMode, 0, (PVOID*)&driver_object);
 
+	if (driver_object != 0)
+	{
+		ObfDereferenceObject(driver_object);
+	}
+
+	return driver_object;
+}
+
+void get_mouse_class_address(PDRIVER_OBJECT* mouclass, PDRIVER_OBJECT* mouhid)
+{
 	if (mouclass)
-		*mouclass = driver_object;
-
-	ObfDereferenceObject(driver_object);
-
-	RtlInitUnicodeString(&class_string, L"\\Driver\\MouHid");
-	ObReferenceObjectByName(&class_string, OBJ_CASE_INSENSITIVE, 0, 0, *IoDriverObjectType, KernelMode, 0, (PVOID*)&driver_object);
+		*mouclass = get_driver_object(L"\\Driver\\MouClass");
 
 	if (mouhid)
-		*mouhid = driver_object;
-
-	ObfDereferenceObject(driver_object);
+		*mouhid = get_driver_object(L"\\Driver\\MouHid");
 }
 
 extern "C" NTSYSCALLAPI NTSTATUS HalPrivateDispatchTable(void);
