@@ -802,6 +802,8 @@ NTSTATUS hooks::input::mouse_apc(void* a1, void* a2, void* a3, void* a4, void* a
 	//
 	// KMBOX:
 	// HID, NONE, NONE  (3,0,0)
+	// 
+	// https://github.com/torvalds/linux/blob/master/drivers/hid/usbhid/usbmouse.c#L217
 	//
 	//
 	if (intf->Class == 3 && intf->SubClass == 0 && intf->Protocol == 0)
