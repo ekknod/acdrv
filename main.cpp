@@ -781,6 +781,29 @@ NTSTATUS hooks::input::mouse_apc(void* a1, void* a2, void* a3, void* a4, void* a
 	QWORD                       ext    = *(QWORD *)((QWORD)hidusb->DeviceExtension + 16LL);
 	PUSB_DEVICE_DESCRIPTOR      desc   = (PUSB_DEVICE_DESCRIPTOR) * (QWORD*)(ext + 0x08);
 	PUSBD_INTERFACE_INFORMATION intf   = (PUSBD_INTERFACE_INFORMATION) * (QWORD*)(ext + 0x10);
+
+
+	//
+	// Class:
+	// 3: hid
+	//
+	// Subclass:
+	// 0: none
+	// 1: Boot
+	//
+	// Protocol:
+	// 0: none
+	// 1: keyboard
+	// 2: mouse
+	//
+	//
+	// Real mouse should be:
+	// HID, Boot, Mouse (3,1,2)
+	//
+	// KMBOX:
+	// HID, NONE, NONE  (3,0,0)
+	//
+	//
 	if (intf->Class == 3 && intf->SubClass == 0 && intf->Protocol == 0)
 	{
 		LOG("potential kmbox (%lx:%lx) [%d:%d:%d]\n", desc->idVendor, desc->idProduct, intf->Class, intf->SubClass, intf->Protocol);
