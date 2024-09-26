@@ -206,39 +206,6 @@ typedef struct _USBD_INTERFACE_INFORMATION {
   PVOID                 Pipes[1];
 } USBD_INTERFACE_INFORMATION, *PUSBD_INTERFACE_INFORMATION;
 
-void enumerate_kmboxnet(USHORT vendor_id, USHORT product_id)
-{
-	PDRIVER_OBJECT hidusb = get_driver_object(L"\\Driver\\hidusb");
-	PDEVICE_OBJECT hidusb_device = hidusb->DeviceObject;
-
-	BOOLEAN found = 0;
-	BOOLEAN found_312 = 0;
-
-	while (hidusb_device)
-	{
-		QWORD                       ext  = *(QWORD *)((QWORD)hidusb_device->DeviceExtension + 16LL);
-		PUSB_DEVICE_DESCRIPTOR      desc = (PUSB_DEVICE_DESCRIPTOR)*(QWORD*)(ext + 0x08);
-		PUSBD_INTERFACE_INFORMATION intf = (PUSBD_INTERFACE_INFORMATION)*(QWORD*)(ext + 0x10);
-		if (desc->idVendor == vendor_id && desc->idProduct == product_id)
-		{
-			found = 1;
-			if (intf->Class == 0x03 && intf->SubClass == 0x01 && intf->Protocol == 0x02)
-			{
-				found_312 = 1;
-			}
-		}
-		hidusb_device = hidusb_device->NextDevice;
-	}
-	if (found)
-	{
-		if (!found_312)
-		{
-			LOG("kmbox detected: %lx:%lx\n", vendor_id, product_id);
-		}
-	}
-	return;
-}
-
 extern "C" NTSTATUS DriverEntry(
 	_In_ PDRIVER_OBJECT  DriverObject,
 	_In_ PUNICODE_STRING RegistryPath
@@ -246,23 +213,6 @@ extern "C" NTSTATUS DriverEntry(
 {
 	UNREFERENCED_PARAMETER(RegistryPath);
 	UNREFERENCED_PARAMETER(DriverObject);
-
-
-	typedef struct {
-		WORD vendor;
-		WORD product;
-	} KMBOX_LIST;
-
-	KMBOX_LIST kmbox_devices[] = {
-		{0x04a5, 0x8002}, // zowie
-		{0x046d, 0xc547}, // logitech g-pro
-		{0x1532, 0x00b7}, // razer deathadder v3 pro
-	};
-
-	for (int i = 0; i < sizeof(kmbox_devices) / sizeof(*kmbox_devices); i++)
-	{
-		enumerate_kmboxnet(kmbox_devices[i].vendor, kmbox_devices[i].product);
-	}
 
 	globals::ntoskrnl = get_module_info(0);
 	globals::vmusbmouse = get_module_info(L"vmusbmouse.sys");
