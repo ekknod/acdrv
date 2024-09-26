@@ -94,14 +94,13 @@ asm_pagefault_handler proc
 	;
 	sub rsp, 40h
 	call pagefault_handler
+	add rsp, 40h
 
 	;
 	; return 0 -> jmp to original handler
 	;
 	test rax, rax
 	je   E0
-	add rsp, 40h
-
 
 	;
 	; continue execution
@@ -115,7 +114,6 @@ E0:
 	;
 	; windows page fault handler
 	;
-	add rsp, 40h
 	restore_general_regs
 	jmp qword ptr [pagefault_handler_original]
 
