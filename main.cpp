@@ -728,9 +728,8 @@ PDEVICE_OBJECT hooks::input::get_mouse_by_unit(WORD unit_id)
 
 	while (hid_device_object)
 	{
-		QWORD             *ext  = (PULONG_PTR)hid_device_object->DeviceExtension;
-		PMOUSE_INPUT_DATA input = (PMOUSE_INPUT_DATA)&ext[0x2C];
-		if (input->UnitId == unit_id)
+		QWORD ext  = (QWORD)hid_device_object->DeviceExtension;
+		if (*(WORD*)(ext + 36) == unit_id)
 		{
 			return hid_device_object;
 		}
